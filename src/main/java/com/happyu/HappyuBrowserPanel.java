@@ -5,6 +5,7 @@ import com.intellij.openapi.Disposable;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Disposer;
+import com.intellij.openapi.util.IconLoader;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBTextField;
 import com.intellij.ui.jcef.JBCefApp;
@@ -54,12 +55,15 @@ final class HappyuBrowserPanel implements Disposable {
     private final String initialUrl;
     private final Consumer<String> openTab;
     private final Consumer<String> titleChanged;
+    private final Runnable stateChanged;
+    private String currentUrl;
+    private boolean browserStarted;
     private final JPanel root = new JPanel(new BorderLayout());
     private final JBTextField addressField = new JBTextField();
-    private final JButton backButton = new JButton("<");
-    private final JButton forwardButton = new JButton(">");
-    private final JButton reloadButton = new JButton("Reload");
-    private final JButton toggleImagesButton = new JButton();
+    private final JButton backButton = createIconButton("back.svg", "Back");
+    private final JButton forwardButton = createIconButton("forward.svg", "Forward");
+    private final JButton reloadButton = createIconButton("reload.svg", "Reload");
+    private final JButton toggleImagesButton = createIconButton("images-off.svg", "Images Off");
     private final LafManagerListener lafListener = manager -> runOnUiThread(this::applyIdeTheme);
 
     private volatile boolean imagesBlocked = true;
@@ -76,25 +80,56 @@ final class HappyuBrowserPanel implements Disposable {
         }
     };
 
-    HappyuBrowserPanel(Project project, String initialUrl, Consumer<String> openTab, Consumer<String> titleChanged) {
+    HappyuBrowserPanel(Project project, String initialUrl, boolean imagesBlocked,
+                       Consumer<String> openTab, Consumer<String> titleChanged, Runnable stateChanged) {
         this.initialUrl = normalizeUrl(initialUrl);
+        this.currentUrl = this.initialUrl;
+        this.imagesBlocked = imagesBlocked;
         this.openTab = openTab;
         this.titleChanged = titleChanged;
+        this.stateChanged = stateChanged;
         addressField.setText(this.initialUrl);
         root.setBorder(BorderFactory.createEmptyBorder());
         root.add(createToolbar(), BorderLayout.NORTH);
         contentModeScript = createContentModeScript();
 
-        if (JBCefApp.isSupported()) {
-            createBrowser();
-        } else {
-            root.add(new JBLabel("JCEF is not supported in this IDE runtime."), BorderLayout.CENTER);
-        }
-
         project.getMessageBus().connect(this).subscribe(LafManagerListener.TOPIC, lafListener);
         updateToggleButton();
         updateNavigationButtons(false, false);
         applyIdeTheme();
+    }
+
+    void ensureBrowserCreated() {
+        if (disposed || browserStarted) return;
+        browserStarted = true;
+        if (JBCefApp.isSupported()) {
+            createBrowser();
+            applyContentMode();
+        } else {
+            root.add(new JBLabel("JCEF is not supported in this IDE runtime."), BorderLayout.CENTER);
+        }
+        root.revalidate();
+        root.repaint();
+    }
+
+    boolean isBrowserStarted() {
+        return browserStarted;
+    }
+
+    String getCurrentUrl() {
+        return currentUrl;
+    }
+
+    boolean isImagesBlocked() {
+        return imagesBlocked;
+    }
+
+    private void recordUrl(String url) {
+        String value = normalizeLoadedUrl(url);
+        if (value != null && !value.equals(currentUrl)) {
+            currentUrl = value;
+            stateChanged.run();
+        }
     }
 
     private JComponent createToolbar() {
@@ -107,10 +142,6 @@ final class HappyuBrowserPanel implements Disposable {
         navigation.add(reloadButton);
         navigation.add(toggleImagesButton);
 
-        backButton.setToolTipText("Back");
-        forwardButton.setToolTipText("Forward");
-        reloadButton.setToolTipText("Reload");
-        toggleImagesButton.setToolTipText("Ctrl+Alt+I");
         addressField.setToolTipText("URL");
 
         backButton.addActionListener(event -> goBack());
@@ -126,6 +157,15 @@ final class HappyuBrowserPanel implements Disposable {
         toolbar.add(navigation, BorderLayout.NORTH);
         toolbar.add(addressField, BorderLayout.CENTER);
         return toolbar;
+    }
+
+    private static JButton createIconButton(String icon, String name) {
+        JButton button = new JButton(IconLoader.getIcon("/icons/" + icon, HappyuBrowserPanel.class));
+        button.setToolTipText(name);
+        button.getAccessibleContext().setAccessibleName(name);
+        button.setPreferredSize(JBUI.size(28, 28));
+        button.setMargin(JBUI.insets(4));
+        return button;
     }
 
     private void createBrowser() {
@@ -194,7 +234,10 @@ final class HappyuBrowserPanel implements Disposable {
                     applyContentMode(frame);
                     if (frame.isMain()) {
                         String url = Objects.toString(frame.getURL(), "");
-                        runOnUiThread(() -> addressField.setText(url));
+                        runOnUiThread(() -> {
+                            addressField.setText(url);
+                            recordUrl(url);
+                        });
                     }
                 }
             }
@@ -224,6 +267,7 @@ final class HappyuBrowserPanel implements Disposable {
                     runOnUiThread(() -> {
                         addressField.setText(Objects.toString(url, ""));
                         addressField.setToolTipText("URL");
+                        recordUrl(url);
                     });
                 }
             }
@@ -250,6 +294,7 @@ final class HappyuBrowserPanel implements Disposable {
         imagesBlocked = !imagesBlocked;
         updateToggleButton();
         contentModeScript = createContentModeScript();
+        stateChanged.run();
 
         if (disposed || browser == null) {
             return;
@@ -268,6 +313,7 @@ final class HappyuBrowserPanel implements Disposable {
         }
 
         String url = normalizeUrl(rawUrl);
+        recordUrl(url);
         addressField.setText(url);
         updateBrowserPageBackground();
         browser.loadURL(url);
@@ -335,7 +381,11 @@ final class HappyuBrowserPanel implements Disposable {
     }
 
     private void updateToggleButton() {
-        toggleImagesButton.setText(imagesBlocked ? "Images Off" : "Images On");
+        String name = imagesBlocked ? "Images Off" : "Images On";
+        toggleImagesButton.setIcon(IconLoader.getIcon(
+                imagesBlocked ? "/icons/images-off.svg" : "/icons/images.svg", HappyuBrowserPanel.class));
+        toggleImagesButton.setToolTipText(name + " (Ctrl+Alt+I)");
+        toggleImagesButton.getAccessibleContext().setAccessibleName(name);
     }
 
     private void applyIdeTheme() {
