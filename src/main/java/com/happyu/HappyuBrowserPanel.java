@@ -1,16 +1,10 @@
 package com.happyu;
 
 import com.intellij.ide.ui.LafManagerListener;
+import com.intellij.openapi.Disposable;
 import com.intellij.openapi.diagnostic.Logger;
-import com.intellij.openapi.fileEditor.FileEditor;
-import com.intellij.openapi.fileEditor.FileEditorLocation;
-import com.intellij.openapi.fileEditor.FileEditorState;
-import com.intellij.openapi.fileEditor.FileEditorStateLevel;
-import com.intellij.openapi.fileEditor.impl.text.TextEditorState;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Disposer;
-import com.intellij.openapi.util.UserDataHolderBase;
-import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBTextField;
 import com.intellij.ui.jcef.JBCefApp;
@@ -19,6 +13,7 @@ import com.intellij.ui.jcef.JBCefClient;
 import com.intellij.util.ui.JBUI;
 import com.intellij.ui.ColorUtil;
 import com.intellij.util.ui.UIUtil;
+import com.intellij.util.concurrency.AppExecutorUtil;
 import org.cef.browser.CefBrowser;
 import org.cef.browser.CefFrame;
 import org.cef.handler.CefDisplayHandlerAdapter;
@@ -44,21 +39,23 @@ import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.FlowLayout;
 import java.awt.event.KeyEvent;
-import java.beans.PropertyChangeListener;
-import java.beans.PropertyChangeSupport;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.function.Consumer;
+import java.util.regex.Pattern;
 
-final class HappyuEditor extends UserDataHolderBase implements FileEditor {
-    private static final Logger LOG = Logger.getInstance(HappyuEditor.class);
-    private static final String HOME_URL = "https://www.baidu.com/";
+final class HappyuBrowserPanel implements Disposable {
+    private static final Logger LOG = Logger.getInstance(HappyuBrowserPanel.class);
+    static final String HOME_URL = "https://www.baidu.com/";
+    private static final Pattern MEDIA_URL = Pattern.compile(".*\\.(png|jpe?g|gif|webp|svg|ico|bmp|avif)(\\?.*)?$");
 
-    private final HappyuVirtualFile file;
-    private final PropertyChangeSupport changeSupport = new PropertyChangeSupport(this);
+    private final String initialUrl;
+    private final Consumer<String> openTab;
+    private final Consumer<String> titleChanged;
     private final JPanel root = new JPanel(new BorderLayout());
-    private final JBTextField addressField = new JBTextField(HOME_URL);
+    private final JBTextField addressField = new JBTextField();
     private final JButton backButton = new JButton("<");
     private final JButton forwardButton = new JButton(">");
     private final JButton reloadButton = new JButton("Reload");
@@ -68,15 +65,25 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
 
     private volatile boolean imagesBlocked = true;
     private volatile boolean disposed;
-    // Built on the EDT; CEF callbacks use a snapshot without retaining native frames.
+    // Built on the EDT; script workers read the snapshot without accessing Swing.
     private volatile String contentModeScript = "";
     private int navigationIndex = -1;
     private boolean loadingFromHistory = false;
     private JBCefBrowser browser;
     private JBCefClient client;
+    private volatile HappyuCefScripts scriptUpdates;
+    private final CefResourceRequestHandler mediaBlocker = new CefResourceRequestHandlerAdapter() {
+        @Override
+        public boolean onBeforeResourceLoad(CefBrowser cefBrowser, CefFrame frame, CefRequest request) {
+            return !disposed && imagesBlocked;
+        }
+    };
 
-    HappyuEditor(Project project, HappyuVirtualFile file) {
-        this.file = file;
+    HappyuBrowserPanel(Project project, String initialUrl, Consumer<String> openTab, Consumer<String> titleChanged) {
+        this.initialUrl = normalizeUrl(initialUrl);
+        this.openTab = openTab;
+        this.titleChanged = titleChanged;
+        addressField.setText(this.initialUrl);
         root.setBorder(BorderFactory.createEmptyBorder());
         root.add(createToolbar(), BorderLayout.NORTH);
         contentModeScript = createContentModeScript();
@@ -94,7 +101,7 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
     }
 
     private JComponent createToolbar() {
-        JPanel toolbar = new JPanel(new BorderLayout(JBUI.scale(8), 0));
+        JPanel toolbar = new JPanel(new BorderLayout(0, JBUI.scale(4)));
         toolbar.setBorder(JBUI.Borders.empty(6, 8));
 
         JPanel navigation = new JPanel(new FlowLayout(FlowLayout.LEFT, JBUI.scale(4), 0));
@@ -119,7 +126,7 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
         toggleImagesButton.addActionListener(event -> toggleImages());
         addressField.addActionListener(event -> load(addressField.getText()));
 
-        toolbar.add(navigation, BorderLayout.WEST);
+        toolbar.add(navigation, BorderLayout.NORTH);
         toolbar.add(addressField, BorderLayout.CENTER);
         return toolbar;
     }
@@ -128,15 +135,17 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
         client = JBCefApp.getInstance().createClient();
         browser = JBCefBrowser.createBuilder()
                 .setClient(client)
-                .setUrl(HOME_URL)
+                .setUrl(initialUrl)
                 .build();
         browser.setOpenLinksInExternalBrowser(false);
+        scriptUpdates = new HappyuCefScripts(browser.getCefBrowser(), () -> contentModeScript,
+                AppExecutorUtil.getAppExecutorService());
         updateBrowserPageBackground();
 
         client.addRequestHandler(new CefRequestHandlerAdapter() {
             @Override
             public boolean onOpenURLFromTab(CefBrowser cefBrowser, CefFrame frame, String targetUrl, boolean userGesture) {
-                openInCurrentTab(targetUrl);
+                openInNewTab(targetUrl);
                 return true;
             }
 
@@ -157,19 +166,15 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
                                                                        boolean isDownload,
                                                                        String requestInitiator,
                                                                        BoolRef disableDefaultHandling) {
-                return new CefResourceRequestHandlerAdapter() {
-                    @Override
-                    public boolean onBeforeResourceLoad(CefBrowser cefBrowser, CefFrame frame, CefRequest request) {
-                        return imagesBlocked && isBlockedResource(request);
-                    }
-                };
+                if (disposed || !imagesBlocked) return null;
+                return resourceRequestHandlerFor(request.getResourceType(), request.getURL());
             }
         }, browser.getCefBrowser());
 
         client.addLifeSpanHandler(new CefLifeSpanHandlerAdapter() {
             @Override
             public boolean onBeforePopup(CefBrowser cefBrowser, CefFrame frame, String targetUrl, String targetFrameName) {
-                openInCurrentTab(targetUrl);
+                openInNewTab(targetUrl);
                 return true;
             }
         }, browser.getCefBrowser());
@@ -209,6 +214,11 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
 
         client.addDisplayHandler(new CefDisplayHandlerAdapter() {
             @Override
+            public void onTitleChange(CefBrowser cefBrowser, String title) {
+                runOnUiThread(() -> titleChanged.accept(Objects.toString(title, "")));
+            }
+
+            @Override
             public void onAddressChange(CefBrowser cefBrowser, CefFrame frame, String url) {
                 if (!disposed && frame != null && frame.isMain()) {
                     runOnUiThread(() -> {
@@ -224,7 +234,7 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
             @Override
             public boolean onPreKeyEvent(CefBrowser cefBrowser, CefKeyboardHandler.CefKeyEvent event, BoolRef isKeyboardShortcut) {
                 if (isToggleShortcut(event)) {
-                    runOnUiThread(HappyuEditor.this::toggleImages);
+                    runOnUiThread(HappyuBrowserPanel.this::toggleImages);
                     return true;
                 }
                 return false;
@@ -274,13 +284,13 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
         updateNavigationButtons();
     }
 
-    private void openInCurrentTab(String rawUrl) {
+    private void openInNewTab(String rawUrl) {
         String url = normalizeLoadedUrl(rawUrl);
         if (url == null) {
             return;
         }
 
-        runOnUiThread(() -> loadUrl(url, false));
+        runOnUiThread(() -> openTab.accept(url));
     }
 
     private void runOnUiThread(Runnable task) {
@@ -423,19 +433,20 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
     }
 
     private void applyContentMode() {
-        if (disposed || browser == null) {
+        HappyuCefScripts updates = scriptUpdates;
+        if (disposed || updates == null) {
             return;
         }
 
-        browser.getCefBrowser().executeJavaScript(contentModeScript, "", 0);
+        updates.requestMainFrame();
     }
 
     private void applyContentMode(@Nullable CefFrame frame) {
-        String script = contentModeScript;
-        if (disposed || frame == null || script.isEmpty() || !frame.isValid()) {
+        HappyuCefScripts updates = scriptUpdates;
+        if (disposed || updates == null) {
             return;
         }
-        frame.executeJavaScript(script, "", 0);
+        updates.request(frame);
     }
 
     private String createContentModeScript() {
@@ -589,20 +600,23 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
                 """.formatted(escapeJavaScript(css), imagesBlocked ? "true" : "false");
     }
 
-    private static boolean isBlockedResource(CefRequest request) {
-        CefRequest.ResourceType type = request.getResourceType();
+    @Nullable CefResourceRequestHandler resourceRequestHandlerFor(CefRequest.ResourceType type, @Nullable String url) {
+        if (disposed || !imagesBlocked) return null;
+        return isBlockedResource(type, url) ? mediaBlocker : null;
+    }
+
+    private static boolean isBlockedResource(CefRequest.ResourceType type, @Nullable String url) {
         if (type == CefRequest.ResourceType.RT_IMAGE ||
                 type == CefRequest.ResourceType.RT_FAVICON ||
                 type == CefRequest.ResourceType.RT_MEDIA) {
             return true;
         }
 
-        String url = request.getURL();
         if (url == null) {
             return false;
         }
         String lower = url.toLowerCase(Locale.ROOT);
-        return lower.matches(".*\\.(png|jpe?g|gif|webp|svg|ico|bmp|avif)(\\?.*)?$");
+        return MEDIA_URL.matcher(lower).matches();
     }
 
     private static boolean isToggleShortcut(CefKeyboardHandler.CefKeyEvent event) {
@@ -649,58 +663,12 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
                 .replace("\n", "\\n");
     }
 
-    @Override
     public @NotNull JComponent getComponent() {
         return root;
     }
 
-    @Override
-    public @Nullable JComponent getPreferredFocusedComponent() {
+    public @NotNull JComponent getPreferredFocusedComponent() {
         return addressField;
-    }
-
-    @Override
-    public @NotNull String getName() {
-        return "happyu";
-    }
-
-    @Override
-    public @NotNull FileEditorState getState(@NotNull FileEditorStateLevel level) {
-        return new TextEditorState();
-    }
-
-    @Override
-    public void setState(@NotNull FileEditorState state) {
-    }
-
-    @Override
-    public boolean isModified() {
-        return false;
-    }
-
-    @Override
-    public boolean isValid() {
-        return !disposed && file.isValid();
-    }
-
-    @Override
-    public void addPropertyChangeListener(@NotNull PropertyChangeListener listener) {
-        changeSupport.addPropertyChangeListener(listener);
-    }
-
-    @Override
-    public void removePropertyChangeListener(@NotNull PropertyChangeListener listener) {
-        changeSupport.removePropertyChangeListener(listener);
-    }
-
-    @Override
-    public @Nullable FileEditorLocation getCurrentLocation() {
-        return null;
-    }
-
-    @Override
-    public @NotNull VirtualFile getFile() {
-        return file;
     }
 
     @Override
@@ -710,6 +678,10 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
         }
         disposed = true;
         contentModeScript = "";
+        if (scriptUpdates != null) {
+            scriptUpdates.dispose();
+            scriptUpdates = null;
+        }
         if (browser != null) {
             Disposer.dispose(browser);
             browser = null;
@@ -718,6 +690,5 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
             Disposer.dispose(client);
             client = null;
         }
-        file.invalidate();
     }
 }
