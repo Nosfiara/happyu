@@ -40,6 +40,7 @@ import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.FlowLayout;
 import java.awt.event.KeyEvent;
+import java.io.IOException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
@@ -49,6 +50,7 @@ import java.util.regex.Pattern;
 
 final class HappyuBrowserPanel implements Disposable {
     private static final Logger LOG = Logger.getInstance(HappyuBrowserPanel.class);
+    private static final String CONTENT_MODE_SCRIPT = loadContentModeScript();
     static final String HOME_URL = "https://www.baidu.com/";
     private static final Pattern MEDIA_URL = Pattern.compile(".*\\.(png|jpe?g|gif|webp|svg|ico|bmp|avif)(\\?.*)?$");
 
@@ -491,102 +493,16 @@ final class HappyuBrowserPanel implements Disposable {
                 imagesBlocked ? imageBlockCss() : imageRestoreCss()
         );
 
-        // CSS handles ordinary elements. Only conflicting inline !important declarations
-        // need adjustment, initially and in added subtrees / changed style attributes.
-        return """
-                (() => {
-                  const key = '__happyuContentMode';
-                  const css = '%s';
-                  const imagesBlocked = %s;
-                  let state = window[key];
-                  if (state && state.css === css && state.style.isConnected) return;
-                  if (!state) {
-                    state = {
-                      style: document.createElement('style'), css: '', imagesBlocked: false,
-                      added: new Set(), changed: new Set(), scheduled: false
-                    };
-                    state.style.id = 'happyu-style';
-                    const normalizedStyles = new WeakMap();
-                    const themedProperties = [
-                      'background-color', 'background-image', 'color', 'border-top-color',
-                      'border-right-color', 'border-bottom-color', 'border-left-color',
-                      'text-shadow', 'box-shadow', 'caret-color'
-                    ];
-                    const mediaSelector = "img, picture, source, video, audio, canvas, svg, iframe[src*='video']";
-                    state.normalize = element => {
-                      if (!element.style) return;
-                      const properties = state.imagesBlocked && element.matches(mediaSelector)
-                        ? [...themedProperties, 'display', 'visibility'] : themedProperties;
-                      for (const property of properties) {
-                        if (element.style.getPropertyPriority(property) === 'important') {
-                          // Keep the site's value; let our stylesheet control the presentation.
-                          element.style.setProperty(property, element.style.getPropertyValue(property), '');
-                        }
-                      }
-                      normalizedStyles.set(element, element.getAttribute('style'));
-                    };
-                    state.scan = root => {
-                      if (root.nodeType === Node.ELEMENT_NODE && root.hasAttribute('style')) {
-                        state.normalize(root);
-                      }
-                      if (root.childElementCount) root.querySelectorAll('[style]').forEach(state.normalize);
-                    };
-                    state.install = () => {
-                      const parent = document.head || document.documentElement;
-                      if (parent && !state.style.isConnected) parent.appendChild(state.style);
-                    };
-                    state.flush = () => {
-                      state.scheduled = false;
-                      const added = state.added;
-                      const changed = state.changed;
-                      state.added = new Set();
-                      state.changed = new Set();
-                      for (const node of added) {
-                        if (!node.isConnected) continue;
-                        // Scan a new subtree once even if nested additions share this batch.
-                        let parent = node.parentElement;
-                        while (parent && !added.has(parent)) parent = parent.parentElement;
-                        if (!parent) state.scan(node);
-                      }
-                      for (const element of changed) {
-                        if (element.isConnected) state.normalize(element);
-                      }
-                    };
-                    state.observer = new MutationObserver(records => {
-                      state.install();
-                      for (const record of records) {
-                        if (record.type === 'attributes') {
-                          // Ignore our own writes; src changes can turn an iframe into media.
-                          if (record.attributeName !== 'style' ||
-                              normalizedStyles.get(record.target) !== record.target.getAttribute('style')) {
-                            state.changed.add(record.target);
-                          }
-                        } else {
-                          for (const node of record.addedNodes) {
-                            if (node.nodeType === Node.ELEMENT_NODE) state.added.add(node);
-                          }
-                        }
-                      }
-                      if (!state.scheduled && (state.added.size || state.changed.size)) {
-                        // Bound work to once per frame, including pages that reassert styles.
-                        state.scheduled = true;
-                        requestAnimationFrame(state.flush);
-                      }
-                    });
-                    state.observer.observe(document, {
-                      childList: true, subtree: true, attributes: true,
-                      attributeFilter: ['style', 'src']
-                    });
-                    window[key] = state;
-                  }
-                  const scanExisting = !state.css || (!state.imagesBlocked && imagesBlocked);
-                  state.imagesBlocked = imagesBlocked;
-                  state.css = css;
-                  if (state.style.textContent !== css) state.style.textContent = css;
-                  state.install();
-                  if (scanExisting) state.scan(document);
-                })();
-                """.formatted(escapeJavaScript(css), imagesBlocked ? "true" : "false");
+        return CONTENT_MODE_SCRIPT + "\n('" + escapeJavaScript(css) + "', " + imagesBlocked + ");";
+    }
+
+    private static String loadContentModeScript() {
+        try (var source = HappyuBrowserPanel.class.getResourceAsStream("/scripts/content-mode.js")) {
+            if (source == null) throw new IllegalStateException("Missing happyu content-mode script");
+            return new String(source.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new IllegalStateException("Unable to load happyu content-mode script", e);
+        }
     }
 
     @Nullable CefResourceRequestHandler resourceRequestHandlerFor(CefRequest.ResourceType type, @Nullable String url) {

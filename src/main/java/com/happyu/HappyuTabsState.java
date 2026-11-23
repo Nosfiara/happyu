@@ -13,6 +13,7 @@ import org.jetbrains.annotations.NotNull;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 @Service(Service.Level.PROJECT)
 @State(name = "HappyuTabs", storages = @Storage(value = "happyu-tabs.xml", roamingType = RoamingType.DISABLED),
@@ -52,6 +53,21 @@ public final class HappyuTabsState implements PersistentStateComponent<HappyuTab
         next.tabs = tabs;
         next.selectedIndex = selectedIndex;
         snapshot = copy(next);
+    }
+
+    synchronized void updateTab(int index, String url, String title, boolean imagesBlocked) {
+        if (closing || index < 0 || index >= snapshot.tabs.size()) return;
+        Tab tab = snapshot.tabs.get(index);
+        if (Objects.equals(tab.url, url) && Objects.equals(tab.title, title)
+                && tab.imagesBlocked == imagesBlocked) return;
+        // Keep serialization snapshots detached, but avoid copying every other tab on each event.
+        snapshot.tabs.set(index, new Tab(url, title, imagesBlocked));
+    }
+
+    synchronized void updateSelection(int selectedIndex) {
+        if (closing) return;
+        snapshot.selectedIndex = snapshot.tabs.isEmpty() ? -1
+                : Math.max(0, Math.min(selectedIndex, snapshot.tabs.size() - 1));
     }
 
     private static Snapshot copy(Snapshot source) {
