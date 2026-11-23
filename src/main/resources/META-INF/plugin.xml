@@ -26,6 +26,8 @@
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
+    <!-- JCEF is a bundled plugin in 262+; older supported IDEs provide it in the platform. -->
+    <depends optional="true" config-file="happyu-jcef.xml">com.intellij.modules.jcef</depends>
 
     <extensions defaultExtensionNs="com.intellij">
         <toolWindow id="happyu"

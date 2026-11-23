@@ -24,8 +24,8 @@ happyu 是一个给 IntelliJ IDEA 用的低调摸鱼浏览器插件。
 
 ## 兼容版本
 
-- IntelliJ IDEA 2024.1 到 2026.1 系列。
-- 对应 IntelliJ Platform build：`241` 到 `261.*`。
+- IntelliJ IDEA 2024.1 到 2026.3 系列。
+- 对应 IntelliJ Platform build：`241` 到 `263.*`。
 
 ## 运行
 
@@ -46,6 +46,18 @@ gradle runIde -PideaLocalPath="/Applications/IntelliJ IDEA.app/Contents"
 ```
 
 生成的插件包在 `build/distributions/`。
+
+## 浏览器卡住时收集诊断
+
+Windows 下，如果 happyu 和其他 JCEF 插件同时卡住，但代码编辑正常，请在重启 IDEA 前运行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Collect-JcefDiagnostics.ps1
+```
+
+脚本通过本机 JDK 的 `jcmd` 连续抓取 3 份原始线程转储，记录 IDEA/JCEF 进程信息，并复制最近的 IDEA/JCEF 日志。结果保存在 `build/diagnostics/jcef-时间戳/`，不会重启或终止 IDEA/JCEF。
+
+如果同时运行多个 IDEA 实例，使用 `-IdeaProcessId 进程号` 指定卡住的实例；自定义日志目录时可传入 `-LogDirectory "日志目录"`。
 
 ## 开源协议
 
