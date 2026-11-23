@@ -1,12 +1,14 @@
 package com.happyu;
 
 import com.intellij.ide.ui.LafManagerListener;
+import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.fileEditor.FileEditor;
 import com.intellij.openapi.fileEditor.FileEditorLocation;
 import com.intellij.openapi.fileEditor.FileEditorState;
 import com.intellij.openapi.fileEditor.FileEditorStateLevel;
 import com.intellij.openapi.fileEditor.impl.text.TextEditorState;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.util.UserDataHolderBase;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.ui.components.JBLabel;
@@ -38,7 +40,6 @@ import javax.swing.JButton;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
-import javax.swing.Timer;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.FlowLayout;
@@ -51,6 +52,7 @@ import java.util.Locale;
 import java.util.Objects;
 
 final class HappyuEditor extends UserDataHolderBase implements FileEditor {
+    private static final Logger LOG = Logger.getInstance(HappyuEditor.class);
     private static final String HOME_URL = "https://www.baidu.com/";
 
     private final HappyuVirtualFile file;
@@ -61,10 +63,13 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
     private final JButton forwardButton = new JButton(">");
     private final JButton reloadButton = new JButton("Reload");
     private final JButton toggleImagesButton = new JButton();
-    private final LafManagerListener lafListener = manager -> SwingUtilities.invokeLater(this::applyIdeTheme);
+    private final LafManagerListener lafListener = manager -> runOnUiThread(this::applyIdeTheme);
     private final List<String> navigationHistory = new ArrayList<>();
 
     private volatile boolean imagesBlocked = true;
+    private volatile boolean disposed;
+    // Built on the EDT; CEF callbacks use a snapshot without retaining native frames.
+    private volatile String contentModeScript = "";
     private int navigationIndex = -1;
     private boolean loadingFromHistory = false;
     private JBCefBrowser browser;
@@ -74,6 +79,7 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
         this.file = file;
         root.setBorder(BorderFactory.createEmptyBorder());
         root.add(createToolbar(), BorderLayout.NORTH);
+        contentModeScript = createContentModeScript();
 
         if (JBCefApp.isSupported()) {
             createBrowser();
@@ -135,6 +141,15 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
             }
 
             @Override
+            public void onRenderProcessTerminated(CefBrowser cefBrowser, TerminationStatus status) {
+                if (!disposed) {
+                    LOG.warn("happyu renderer terminated: " + status);
+                    runOnUiThread(() -> addressField.setToolTipText(
+                            "Renderer stopped: " + status + ". Try Reload or reopen happyu."));
+                }
+            }
+
+            @Override
             public CefResourceRequestHandler getResourceRequestHandler(CefBrowser cefBrowser,
                                                                        CefFrame frame,
                                                                        CefRequest request,
@@ -162,29 +177,32 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
         client.addLoadHandler(new CefLoadHandlerAdapter() {
             @Override
             public void onLoadStart(CefBrowser cefBrowser, CefFrame frame, CefRequest.TransitionType transitionType) {
-                if (frame != null) {
-                    SwingUtilities.invokeLater(() -> scheduleContentMode(frame));
-                }
-            }
-
-            @Override
-            public void onLoadingStateChange(CefBrowser cefBrowser, boolean isLoading, boolean canGoBack, boolean canGoForward) {
-                if (!isLoading) {
-                    SwingUtilities.invokeLater(HappyuEditor.this::scheduleContentMode);
-                }
+                applyContentMode(frame);
             }
 
             @Override
             public void onLoadEnd(CefBrowser cefBrowser, CefFrame frame, int httpStatusCode) {
-                if (frame != null) {
-                    SwingUtilities.invokeLater(() -> {
-                        if (frame.isMain()) {
-                            String url = Objects.toString(cefBrowser.getURL(), "");
+                if (!disposed && frame != null) {
+                    applyContentMode(frame);
+                    if (frame.isMain()) {
+                        String url = Objects.toString(frame.getURL(), "");
+                        runOnUiThread(() -> {
                             addressField.setText(url);
                             recordNavigation(url);
-                        }
-                        scheduleContentMode(frame);
-                    });
+                        });
+                    }
+                }
+            }
+
+            @Override
+            public void onLoadError(CefBrowser cefBrowser, CefFrame frame, ErrorCode errorCode,
+                                    String errorText, String failedUrl) {
+                if (!disposed && errorCode != ErrorCode.ERR_ABORTED) {
+                    LOG.warn("happyu page load failed: " + errorCode + " (" + errorText + ")");
+                    if (frame != null && frame.isMain()) {
+                        runOnUiThread(() -> addressField.setToolTipText(
+                                "Load failed: " + errorCode + ". Try Reload."));
+                    }
                 }
             }
         }, browser.getCefBrowser());
@@ -192,9 +210,10 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
         client.addDisplayHandler(new CefDisplayHandlerAdapter() {
             @Override
             public void onAddressChange(CefBrowser cefBrowser, CefFrame frame, String url) {
-                if (frame != null && frame.isMain()) {
-                    SwingUtilities.invokeLater(() -> {
+                if (!disposed && frame != null && frame.isMain()) {
+                    runOnUiThread(() -> {
                         addressField.setText(Objects.toString(url, ""));
+                        addressField.setToolTipText("URL");
                         recordAddressChange(url);
                     });
                 }
@@ -205,7 +224,7 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
             @Override
             public boolean onPreKeyEvent(CefBrowser cefBrowser, CefKeyboardHandler.CefKeyEvent event, BoolRef isKeyboardShortcut) {
                 if (isToggleShortcut(event)) {
-                    SwingUtilities.invokeLater(HappyuEditor.this::toggleImages);
+                    runOnUiThread(HappyuEditor.this::toggleImages);
                     return true;
                 }
                 return false;
@@ -216,10 +235,14 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
     }
 
     void toggleImages() {
+        if (disposed) {
+            return;
+        }
         imagesBlocked = !imagesBlocked;
         updateToggleButton();
+        contentModeScript = createContentModeScript();
 
-        if (browser == null) {
+        if (disposed || browser == null) {
             return;
         }
 
@@ -231,7 +254,7 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
     }
 
     private void load(String rawUrl) {
-        if (browser == null) {
+        if (disposed || browser == null) {
             return;
         }
 
@@ -240,7 +263,7 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
     }
 
     private void loadUrl(String url, boolean fromHistory) {
-        if (browser == null) {
+        if (disposed || browser == null) {
             return;
         }
 
@@ -257,7 +280,15 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
             return;
         }
 
-        SwingUtilities.invokeLater(() -> loadUrl(url, false));
+        runOnUiThread(() -> loadUrl(url, false));
+    }
+
+    private void runOnUiThread(Runnable task) {
+        SwingUtilities.invokeLater(() -> {
+            if (!disposed) {
+                task.run();
+            }
+        });
     }
 
     private void goBack() {
@@ -359,6 +390,9 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
     }
 
     private void applyIdeTheme() {
+        if (disposed) {
+            return;
+        }
         Color background = UIUtil.getPanelBackground();
         Color foreground = UIUtil.getLabelForeground();
         root.setBackground(background);
@@ -366,7 +400,8 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
         addressField.setForeground(UIUtil.getTextFieldForeground());
         setComponentColors(root, background, foreground);
         updateBrowserPageBackground();
-        scheduleContentMode();
+        contentModeScript = createContentModeScript();
+        applyContentMode();
     }
 
     private void updateBrowserPageBackground() {
@@ -388,36 +423,22 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
     }
 
     private void applyContentMode() {
-        if (browser == null) {
+        if (disposed || browser == null) {
             return;
         }
 
-        applyContentMode(browser.getCefBrowser().getMainFrame());
-    }
-
-    private void scheduleContentMode() {
-        if (browser == null) {
-            return;
-        }
-
-        scheduleContentMode(browser.getCefBrowser().getMainFrame());
-    }
-
-    private void scheduleContentMode(@Nullable CefFrame frame) {
-        applyContentMode(frame);
-        int[] delays = {150, 500, 1000, 2000};
-        for (int delay : delays) {
-            Timer timer = new Timer(delay, event -> applyContentMode(frame));
-            timer.setRepeats(false);
-            timer.start();
-        }
+        browser.getCefBrowser().executeJavaScript(contentModeScript, "", 0);
     }
 
     private void applyContentMode(@Nullable CefFrame frame) {
-        if (browser == null || frame == null || !frame.isValid()) {
+        String script = contentModeScript;
+        if (disposed || frame == null || script.isEmpty() || !frame.isValid()) {
             return;
         }
+        frame.executeJavaScript(script, "", 0);
+    }
 
+    private String createContentModeScript() {
         Color background = UIUtil.getPanelBackground();
         Color foreground = UIUtil.getLabelForeground();
         Color fieldBackground = UIUtil.getTextFieldBackground();
@@ -443,10 +464,9 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
                   caret-color: %s !important;
                 }
                 header, nav, aside, main, article, section, table, thead, tbody, tfoot, tr, td, th,
-                [class*='card'], [class*='Card'], [class*='item'], [class*='Item'],
-                [class*='list'], [class*='List'], [class*='content'], [class*='Content'],
-                [class*='container'], [class*='Container'], [class*='wrapper'], [class*='Wrapper'],
-                [class*='panel'], [class*='Panel'], [class*='box'], [class*='Box'] {
+                [class*='card' i], [class*='item' i], [class*='list' i], [class*='content' i],
+                [class*='container' i], [class*='wrapper' i], [class*='panel' i],
+                [class*='box' i], [class*='rank' i], [class*='hot' i] {
                   background-color: %s !important;
                 }
                 a, a *, a:visited, a:visited * { color: %s !important; }
@@ -471,92 +491,102 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
                 imagesBlocked ? imageBlockCss() : imageRestoreCss()
         );
 
-        String script = """
+        // CSS handles ordinary elements. Only conflicting inline !important declarations
+        // need adjustment, initially and in added subtrees / changed style attributes.
+        return """
                 (() => {
-                  const styleId = 'happyu-style';
+                  const key = '__happyuContentMode';
                   const css = '%s';
-                  const background = '%s';
-                  const foreground = '%s';
-                  const card = '%s';
-                  const border = '%s';
-                  const link = '%s';
                   const imagesBlocked = %s;
-
-                  function forceElement(element) {
-                    if (!element || !element.style) return;
-                    const tag = (element.tagName || '').toLowerCase();
-                    const className = String(element.className || '');
-
-                    if (imagesBlocked && (tag === 'img' || tag === 'picture' || tag === 'video' ||
-                        tag === 'audio' || tag === 'canvas' || tag === 'svg' || tag === 'source')) {
-                      element.style.setProperty('display', 'none', 'important');
-                      element.style.setProperty('visibility', 'hidden', 'important');
-                      return;
-                    }
-
-                    element.style.setProperty('background-image', 'none', 'important');
-                    element.style.setProperty('border-color', border, 'important');
-                    element.style.setProperty('color', tag === 'a' ? link : foreground, 'important');
-
-                    const looksLikeCard = /card|item|list|content|container|wrapper|panel|box|rank|hot/i.test(className) ||
-                      ['header', 'nav', 'aside', 'main', 'article', 'section', 'table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th'].includes(tag);
-                    element.style.setProperty('background-color', looksLikeCard ? card : 'transparent', 'important');
+                  let state = window[key];
+                  if (state && state.css === css && state.style.isConnected) return;
+                  if (!state) {
+                    state = {
+                      style: document.createElement('style'), css: '', imagesBlocked: false,
+                      added: new Set(), changed: new Set(), scheduled: false
+                    };
+                    state.style.id = 'happyu-style';
+                    const normalizedStyles = new WeakMap();
+                    const themedProperties = [
+                      'background-color', 'background-image', 'color', 'border-top-color',
+                      'border-right-color', 'border-bottom-color', 'border-left-color',
+                      'text-shadow', 'box-shadow', 'caret-color'
+                    ];
+                    const mediaSelector = "img, picture, source, video, audio, canvas, svg, iframe[src*='video']";
+                    state.normalize = element => {
+                      if (!element.style) return;
+                      const properties = state.imagesBlocked && element.matches(mediaSelector)
+                        ? [...themedProperties, 'display', 'visibility'] : themedProperties;
+                      for (const property of properties) {
+                        if (element.style.getPropertyPriority(property) === 'important') {
+                          // Keep the site's value; let our stylesheet control the presentation.
+                          element.style.setProperty(property, element.style.getPropertyValue(property), '');
+                        }
+                      }
+                      normalizedStyles.set(element, element.getAttribute('style'));
+                    };
+                    state.scan = root => {
+                      if (root.nodeType === Node.ELEMENT_NODE && root.hasAttribute('style')) {
+                        state.normalize(root);
+                      }
+                      if (root.childElementCount) root.querySelectorAll('[style]').forEach(state.normalize);
+                    };
+                    state.install = () => {
+                      const parent = document.head || document.documentElement;
+                      if (parent && !state.style.isConnected) parent.appendChild(state.style);
+                    };
+                    state.flush = () => {
+                      state.scheduled = false;
+                      const added = state.added;
+                      const changed = state.changed;
+                      state.added = new Set();
+                      state.changed = new Set();
+                      for (const node of added) {
+                        if (!node.isConnected) continue;
+                        // Scan a new subtree once even if nested additions share this batch.
+                        let parent = node.parentElement;
+                        while (parent && !added.has(parent)) parent = parent.parentElement;
+                        if (!parent) state.scan(node);
+                      }
+                      for (const element of changed) {
+                        if (element.isConnected) state.normalize(element);
+                      }
+                    };
+                    state.observer = new MutationObserver(records => {
+                      state.install();
+                      for (const record of records) {
+                        if (record.type === 'attributes') {
+                          // Ignore our own writes; src changes can turn an iframe into media.
+                          if (record.attributeName !== 'style' ||
+                              normalizedStyles.get(record.target) !== record.target.getAttribute('style')) {
+                            state.changed.add(record.target);
+                          }
+                        } else {
+                          for (const node of record.addedNodes) {
+                            if (node.nodeType === Node.ELEMENT_NODE) state.added.add(node);
+                          }
+                        }
+                      }
+                      if (!state.scheduled && (state.added.size || state.changed.size)) {
+                        // Bound work to once per frame, including pages that reassert styles.
+                        state.scheduled = true;
+                        requestAnimationFrame(state.flush);
+                      }
+                    });
+                    state.observer.observe(document, {
+                      childList: true, subtree: true, attributes: true,
+                      attributeFilter: ['style', 'src']
+                    });
+                    window[key] = state;
                   }
-
-                  function forceTree() {
-                    const root = document.documentElement;
-                    if (!root) return;
-                    root.style.setProperty('background-color', background, 'important');
-                    root.style.setProperty('color', foreground, 'important');
-                    if (document.body) {
-                      document.body.style.setProperty('background-color', background, 'important');
-                      document.body.style.setProperty('color', foreground, 'important');
-                    }
-                    document.querySelectorAll('*').forEach(forceElement);
-                  }
-
-                  function install() {
-                    const root = document.documentElement || document.body;
-                    if (!root) {
-                      setTimeout(install, 50);
-                      return;
-                    }
-
-                    let style = document.getElementById(styleId);
-                    if (!style) {
-                      style = document.createElement('style');
-                      style.id = styleId;
-                      (document.head || root).appendChild(style);
-                    }
-                    style.textContent = css;
-
-                    forceTree();
-
-                    if (!window.__happyuHappyuObserver) {
-                      window.__happyuHappyuObserver = new MutationObserver(() => {
-                        window.clearTimeout(window.__happyuHappyuTimer);
-                        window.__happyuHappyuTimer = window.setTimeout(forceTree, 30);
-                      });
-                      window.__happyuHappyuObserver.observe(root, {
-                        childList: true,
-                        subtree: true
-                      });
-                    }
-                  }
-
-                  install();
+                  const scanExisting = !state.css || (!state.imagesBlocked && imagesBlocked);
+                  state.imagesBlocked = imagesBlocked;
+                  state.css = css;
+                  if (state.style.textContent !== css) state.style.textContent = css;
+                  state.install();
+                  if (scanExisting) state.scan(document);
                 })();
-                """.formatted(
-                escapeJavaScript(css),
-                toCssColor(background),
-                toCssColor(foreground),
-                toCssColor(card),
-                toCssColor(border),
-                toCssColor(link),
-                imagesBlocked ? "true" : "false"
-        );
-
-        frame.executeJavaScript(script, frame.getURL(), 0);
+                """.formatted(escapeJavaScript(css), imagesBlocked ? "true" : "false");
     }
 
     private static boolean isBlockedResource(CefRequest request) {
@@ -650,7 +680,7 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
 
     @Override
     public boolean isValid() {
-        return file.isValid();
+        return !disposed && file.isValid();
     }
 
     @Override
@@ -675,12 +705,17 @@ final class HappyuEditor extends UserDataHolderBase implements FileEditor {
 
     @Override
     public void dispose() {
+        if (disposed) {
+            return;
+        }
+        disposed = true;
+        contentModeScript = "";
         if (browser != null) {
-            browser.dispose();
+            Disposer.dispose(browser);
             browser = null;
         }
         if (client != null) {
-            client.dispose();
+            Disposer.dispose(client);
             client = null;
         }
         file.invalidate();
