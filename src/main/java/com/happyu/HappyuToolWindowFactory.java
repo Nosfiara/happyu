@@ -46,7 +46,7 @@ public final class HappyuToolWindowFactory implements ToolWindowFactory, DumbAwa
             public void selectionChanged(@NotNull ContentManagerEvent event) {
                 if (!restoring[0]) {
                     startSelected(manager);
-                    saveTabs(project, manager);
+                    saveSelection(project, manager);
                 }
             }
         };
@@ -113,9 +113,8 @@ public final class HappyuToolWindowFactory implements ToolWindowFactory, DumbAwa
                 target -> ToolWindowManager.getInstance(project).invokeLater(
                         () -> addTab(project, toolWindow, target)),
                 title -> {
-                    setTitle(content, title);
-                    saveTabs(project, manager);
-                }, () -> saveTabs(project, manager));
+                    if (setTitle(content, title)) saveTab(project, manager, content);
+                }, () -> saveTab(project, manager, content));
         content.setComponent(panel.getComponent());
         content.setPreferredFocusableComponent(panel.getPreferredFocusedComponent());
         content.setCloseable(true);
@@ -125,10 +124,12 @@ public final class HappyuToolWindowFactory implements ToolWindowFactory, DumbAwa
         if (select) manager.setSelectedContent(content, true);
     }
 
-    private static void setTitle(Content content, String title) {
+    private static boolean setTitle(Content content, String title) {
         String label = title.isBlank() ? "happyu" : title.strip();
+        if (label.equals(content.getDescription())) return false;
         content.setDisplayName(label.length() > 32 ? label.substring(0, 32) + "…" : label);
         content.setDescription(label);
+        return true;
     }
 
     private static void startSelected(ContentManager manager) {
@@ -149,5 +150,22 @@ public final class HappyuToolWindowFactory implements ToolWindowFactory, DumbAwa
             }
         }
         project.getService(HappyuTabsState.class).update(tabs, selectedIndex);
+    }
+
+    private static void saveTab(Project project, ContentManager manager, Content content) {
+        if (project.isDisposed() || manager.isDisposed()) return;
+        int index = manager.getIndexOfContent(content);
+        HappyuBrowserPanel panel = content.getUserData(BROWSER_KEY);
+        if (index >= 0 && panel != null) {
+            project.getService(HappyuTabsState.class).updateTab(index,
+                    panel.getCurrentUrl(), content.getDescription(), panel.isImagesBlocked());
+        }
+    }
+
+    private static void saveSelection(Project project, ContentManager manager) {
+        if (project.isDisposed() || manager.isDisposed()) return;
+        Content selected = manager.getSelectedContent();
+        project.getService(HappyuTabsState.class).updateSelection(
+                selected == null ? -1 : manager.getIndexOfContent(selected));
     }
 }

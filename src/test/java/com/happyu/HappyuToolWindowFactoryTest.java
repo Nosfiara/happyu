@@ -21,6 +21,7 @@ import java.awt.Container;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 
 public final class HappyuToolWindowFactoryTest extends LightPlatformTestCase {
     private ContentManager manager;
@@ -131,6 +132,42 @@ public final class HappyuToolWindowFactoryTest extends LightPlatformTestCase {
         assertEquals(0, savedTabs().selectedIndex);
     }
 
+    public void testFrequentSingleTabUpdatesPreserveOtherTabsAndDetachedSnapshots() throws Exception {
+        titleActions.get(0).actionPerformed(TestActionEvent.createTestEvent());
+        HappyuTabsState.Snapshot before = savedTabs();
+        var recordUrl = HappyuBrowserPanel.class.getDeclaredMethod("recordUrl", String.class);
+        recordUrl.setAccessible(true);
+        var titleChanged = HappyuBrowserPanel.class.getDeclaredField("titleChanged");
+        titleChanged.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        Consumer<String> title = (Consumer<String>) titleChanged.get(panel(1));
+        for (int i = 0; i < 100; i++) {
+            title.accept("Page " + i);
+            title.accept("Page " + i);
+            recordUrl.invoke(panel(1), "https://example.com/page/" + i);
+        }
+        panel(1).toggleImages();
+        manager.setSelectedContent(manager.getContent(0));
+        HappyuTabsState.Snapshot after = savedTabs();
+        assertEquals(0, after.selectedIndex);
+        assertEquals("Page 99", after.tabs.get(1).title);
+        assertEquals("https://example.com/page/99", after.tabs.get(1).url);
+        assertFalse(after.tabs.get(1).imagesBlocked);
+        assertEquals(before.tabs.get(0).url, after.tabs.get(0).url);
+        assertEquals(before.tabs.get(0).title, after.tabs.get(0).title);
+        assertEquals("New Tab", before.tabs.get(1).title);
+        assertEquals(HappyuBrowserPanel.HOME_URL, before.tabs.get(1).url);
+        assertTrue(before.tabs.get(1).imagesBlocked);
+        assertEquals(1, before.selectedIndex);
+        // A caller mutating a returned serialization bean cannot alter live state.
+        after.tabs.get(1).url = "https://changed.example/";
+        assertEquals("https://example.com/page/99", savedTabs().tabs.get(1).url);
+        assertTrue(manager.removeContent(manager.getContent(0), true));
+        title.accept("After reorder");
+        assertEquals("After reorder", savedTabs().tabs.get(0).title);
+        assertEquals("https://example.com/page/99", savedTabs().tabs.get(0).url);
+    }
+
     public void testDisposingWindowDoesNotEraseSavedTabs() {
         titleActions.get(0).actionPerformed(TestActionEvent.createTestEvent());
         HappyuTabsState.Snapshot before = savedTabs();
@@ -147,8 +184,12 @@ public final class HappyuToolWindowFactoryTest extends LightPlatformTestCase {
         titleActions.get(0).actionPerformed(TestActionEvent.createTestEvent());
         ApplicationManager.getApplication().getMessageBus().syncPublisher(ProjectManager.TOPIC)
                 .projectClosing(getProject());
+        panel(1).toggleImages();
+        manager.setSelectedContent(manager.getContent(0));
         manager.removeAllContents(true);
         assertEquals(2, savedTabs().tabs.size());
+        assertTrue(savedTabs().tabs.get(1).imagesBlocked);
+        assertEquals(1, savedTabs().selectedIndex);
     }
 
     public void testCancelledProjectCloseStillSavesTabChanges() {
