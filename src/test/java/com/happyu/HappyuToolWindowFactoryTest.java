@@ -30,15 +30,14 @@ public final class HappyuToolWindowFactoryTest extends LightPlatformTestCase {
         manager = ContentFactory.getInstance().createContentManager(true, getProject());
         Disposer.register(getTestRootDisposable(), manager);
         ToolWindow window = (ToolWindow) Proxy.newProxyInstance(ToolWindow.class.getClassLoader(),
-                new Class<?>[]{ToolWindow.class}, (proxy, method, args) -> {
-                    switch (method.getName()) {
-                        case "getContentManager": return manager;
-                        case "setTitleActions":
-                            for (Object action : (List<?>) args[0]) titleActions.add((AnAction) action);
-                            return null;
-                        case "setContentUiType", "setToHideOnEmptyContent": return null;
-                        default: throw new AssertionError("Unexpected tool window call: " + method.getName());
+                new Class<?>[]{ToolWindow.class}, (proxy, method, args) -> switch (method.getName()) {
+                    case "getContentManager" -> manager;
+                    case "setTitleActions" -> {
+                        for (Object action : (List<?>) args[0]) titleActions.add((AnAction) action);
+                        yield null;
                     }
+                    case "setContentUiType", "setToHideOnEmptyContent" -> null;
+                    default -> throw new AssertionError("Unexpected tool window call: " + method.getName());
                 });
         new HappyuToolWindowFactory().createToolWindowContent(getProject(), window);
     }

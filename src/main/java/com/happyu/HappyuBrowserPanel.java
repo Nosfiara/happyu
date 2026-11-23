@@ -39,8 +39,8 @@ import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.FlowLayout;
 import java.awt.event.KeyEvent;
-import java.util.ArrayList;
-import java.util.List;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.function.Consumer;
@@ -61,14 +61,11 @@ final class HappyuBrowserPanel implements Disposable {
     private final JButton reloadButton = new JButton("Reload");
     private final JButton toggleImagesButton = new JButton();
     private final LafManagerListener lafListener = manager -> runOnUiThread(this::applyIdeTheme);
-    private final List<String> navigationHistory = new ArrayList<>();
 
     private volatile boolean imagesBlocked = true;
     private volatile boolean disposed;
     // Built on the EDT; script workers read the snapshot without accessing Swing.
     private volatile String contentModeScript = "";
-    private int navigationIndex = -1;
-    private boolean loadingFromHistory = false;
     private JBCefBrowser browser;
     private JBCefClient client;
     private volatile HappyuCefScripts scriptUpdates;
@@ -96,7 +93,7 @@ final class HappyuBrowserPanel implements Disposable {
 
         project.getMessageBus().connect(this).subscribe(LafManagerListener.TOPIC, lafListener);
         updateToggleButton();
-        updateNavigationButtons();
+        updateNavigationButtons(false, false);
         applyIdeTheme();
     }
 
@@ -181,6 +178,12 @@ final class HappyuBrowserPanel implements Disposable {
 
         client.addLoadHandler(new CefLoadHandlerAdapter() {
             @Override
+            public void onLoadingStateChange(CefBrowser cefBrowser, boolean isLoading,
+                                             boolean canGoBack, boolean canGoForward) {
+                runOnUiThread(() -> updateNavigationButtons(canGoBack, canGoForward));
+            }
+
+            @Override
             public void onLoadStart(CefBrowser cefBrowser, CefFrame frame, CefRequest.TransitionType transitionType) {
                 applyContentMode(frame);
             }
@@ -191,10 +194,7 @@ final class HappyuBrowserPanel implements Disposable {
                     applyContentMode(frame);
                     if (frame.isMain()) {
                         String url = Objects.toString(frame.getURL(), "");
-                        runOnUiThread(() -> {
-                            addressField.setText(url);
-                            recordNavigation(url);
-                        });
+                        runOnUiThread(() -> addressField.setText(url));
                     }
                 }
             }
@@ -224,7 +224,6 @@ final class HappyuBrowserPanel implements Disposable {
                     runOnUiThread(() -> {
                         addressField.setText(Objects.toString(url, ""));
                         addressField.setToolTipText("URL");
-                        recordAddressChange(url);
                     });
                 }
             }
@@ -256,9 +255,9 @@ final class HappyuBrowserPanel implements Disposable {
             return;
         }
 
-        if (imagesBlocked) {
-            applyContentMode();
-        } else {
+        applyContentMode();
+        if (!imagesBlocked) {
+            // Reload previously blocked resources; also update every current frame immediately.
             browser.getCefBrowser().reloadIgnoreCache();
         }
     }
@@ -269,19 +268,9 @@ final class HappyuBrowserPanel implements Disposable {
         }
 
         String url = normalizeUrl(rawUrl);
-        loadUrl(url, false);
-    }
-
-    private void loadUrl(String url, boolean fromHistory) {
-        if (disposed || browser == null) {
-            return;
-        }
-
-        loadingFromHistory = fromHistory;
         addressField.setText(url);
         updateBrowserPageBackground();
         browser.loadURL(url);
-        updateNavigationButtons();
     }
 
     private void openInNewTab(String rawUrl) {
@@ -302,65 +291,15 @@ final class HappyuBrowserPanel implements Disposable {
     }
 
     private void goBack() {
-        if (navigationIndex <= 0) {
-            return;
+        if (!disposed && browser != null) {
+            browser.getCefBrowser().goBack();
         }
-
-        navigationIndex--;
-        loadUrl(navigationHistory.get(navigationIndex), true);
     }
 
     private void goForward() {
-        if (navigationIndex >= navigationHistory.size() - 1) {
-            return;
+        if (!disposed && browser != null) {
+            browser.getCefBrowser().goForward();
         }
-
-        navigationIndex++;
-        loadUrl(navigationHistory.get(navigationIndex), true);
-    }
-
-    private void recordNavigation(String rawUrl) {
-        String url = normalizeLoadedUrl(rawUrl);
-        if (url == null) {
-            updateNavigationButtons();
-            return;
-        }
-
-        if (loadingFromHistory) {
-            loadingFromHistory = false;
-            if (navigationIndex >= 0 && navigationIndex < navigationHistory.size()) {
-                navigationHistory.set(navigationIndex, url);
-            }
-            updateNavigationButtons();
-            return;
-        }
-
-        if (navigationIndex >= 0 && url.equals(navigationHistory.get(navigationIndex))) {
-            updateNavigationButtons();
-            return;
-        }
-
-        if (navigationIndex < navigationHistory.size() - 1) {
-            navigationHistory.subList(navigationIndex + 1, navigationHistory.size()).clear();
-        }
-        navigationHistory.add(url);
-        navigationIndex = navigationHistory.size() - 1;
-        updateNavigationButtons();
-    }
-
-    private void recordAddressChange(String rawUrl) {
-        String url = normalizeLoadedUrl(rawUrl);
-        if (url == null) {
-            updateNavigationButtons();
-            return;
-        }
-
-        if (loadingFromHistory) {
-            updateNavigationButtons();
-            return;
-        }
-
-        recordNavigation(url);
     }
 
     private static String normalizeLoadedUrl(String rawUrl) {
@@ -375,12 +314,12 @@ final class HappyuBrowserPanel implements Disposable {
         return value;
     }
 
-    private void updateNavigationButtons() {
-        backButton.setEnabled(navigationIndex > 0);
-        forwardButton.setEnabled(navigationIndex >= 0 && navigationIndex < navigationHistory.size() - 1);
+    private void updateNavigationButtons(boolean canGoBack, boolean canGoForward) {
+        backButton.setEnabled(canGoBack);
+        forwardButton.setEnabled(canGoForward);
     }
 
-    private static String normalizeUrl(String rawUrl) {
+    static String normalizeUrl(String rawUrl) {
         String value = rawUrl == null ? "" : rawUrl.trim();
         if (value.isEmpty()) {
             return HOME_URL;
@@ -392,7 +331,7 @@ final class HappyuBrowserPanel implements Disposable {
         if (value.contains(".") && !value.contains(" ")) {
             return "https://" + value;
         }
-        return "https://www.baidu.com/s?wd=" + value.replace(" ", "+");
+        return "https://www.baidu.com/s?wd=" + URLEncoder.encode(value, StandardCharsets.UTF_8);
     }
 
     private void updateToggleButton() {
@@ -438,7 +377,7 @@ final class HappyuBrowserPanel implements Disposable {
             return;
         }
 
-        updates.requestMainFrame();
+        updates.requestAllFrames();
     }
 
     private void applyContentMode(@Nullable CefFrame frame) {
