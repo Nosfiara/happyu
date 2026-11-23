@@ -8,6 +8,9 @@ import java.lang.reflect.Proxy;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Vector;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -16,6 +19,8 @@ public final class HappyuCefScriptsTest extends TestCase {
     private final List<String> events = new ArrayList<>();
     private final AtomicReference<String> script = new AtomicReference<>("theme");
     private int frameLookups;
+    private int frameEnumerations;
+    private final List<Object> lookedUpIds = new ArrayList<>();
 
     public void testCallbackOnlyCopiesMetadataAndWorkerAcquiresItsOwnFrame() {
         AtomicBoolean callbackAlive = new AtomicBoolean(true);
@@ -51,13 +56,83 @@ public final class HappyuCefScriptsTest extends TestCase {
 
     public void testClosingPanelCancelsPendingWorkWithoutNativeCalls() {
         HappyuCefScripts queue = queue(frame(true, "https://example.com/", null, true));
-        queue.requestMainFrame();
+        queue.requestAllFrames();
         queue.dispose();
-        queue.requestMainFrame();
+        queue.requestAllFrames();
         workers.remove().run();
         assertEquals(0, frameLookups);
+        assertEquals(0, frameEnumerations);
         assertTrue(events.isEmpty());
         assertTrue(workers.isEmpty());
+    }
+
+    public void testAllFramesRefreshIsDeferredCoalescedAndIncludesNestedCrossOriginFrames() {
+        Map<Object, CefFrame> frames = new LinkedHashMap<>();
+        frames.put(frameId(1), frame(true, "https://example.com/", null, true));
+        frames.put(frameId(2), frame(false, "https://other.example/frame", null, true));
+        frames.put(frameId(3), frame(false, "https://nested.example/frame", null, true));
+        HappyuCefScripts queue = queue(frames);
+        for (int i = 0; i < 100; i++) queue.requestAllFrames();
+        assertEquals(1, workers.size());
+        assertEquals(0, frameEnumerations);
+        assertEquals(0, frameLookups);
+        script.set("latest theme and images off");
+        workers.remove().run();
+        assertEquals(1, frameEnumerations);
+        assertEquals(new ArrayList<>(frames.keySet()), lookedUpIds);
+        assertEquals(List.of("script:latest theme and images off", "dispose",
+                "script:latest theme and images off", "dispose",
+                "script:latest theme and images off", "dispose"), events);
+    }
+
+    public void testRemovedFrameDoesNotPreventUpdatingRemainingFrames() {
+        Map<Object, CefFrame> frames = new LinkedHashMap<>();
+        frames.put(frameId(1), null);
+        frames.put(frameId(2), frame(false, "https://example.com/remaining", null, true));
+        HappyuCefScripts queue = queue(frames);
+        queue.requestAllFrames();
+        workers.remove().run();
+        assertEquals(2, frameLookups);
+        assertEquals(List.of("script:theme", "dispose"), events);
+    }
+
+    public void testFrameLoadedAfterRefreshReceivesCurrentSettings() {
+        Map<Object, CefFrame> frames = new LinkedHashMap<>();
+        HappyuCefScripts queue = queue(frames);
+        queue.requestAllFrames();
+        workers.remove().run();
+        assertTrue(events.isEmpty());
+        script.set("new theme and images off");
+        frames.put(frameId(42), frame(false, "https://new.example/frame", null, true));
+        queue.request(frame(false, "https://new.example/frame", new AtomicBoolean(true), false));
+        workers.remove().run();
+        assertEquals(List.of("script:new theme and images off", "dispose"), events);
+    }
+
+    private HappyuCefScripts queue(Map<Object, CefFrame> frames) {
+        CefBrowser browser = (CefBrowser) Proxy.newProxyInstance(CefBrowser.class.getClassLoader(),
+                new Class<?>[]{CefBrowser.class}, (proxy, method, args) -> switch (method.getName()) {
+                    case "getFrameIdentifiers" -> {
+                        frameEnumerations++;
+                        yield new Vector<>(frames.keySet());
+                    }
+                    case "getFrame", "getFrameByIdentifier" -> {
+                        frameLookups++;
+                        lookedUpIds.add(args[0]);
+                        yield frames.get(args[0]);
+                    }
+                    default -> throw new AssertionError("Unexpected browser call: " + method.getName());
+                });
+        return new HappyuCefScripts(browser, script::get, workers::add);
+    }
+
+    private static Object frameId(int id) {
+        try {
+            return CefFrame.class.getMethod("getIdentifier").getReturnType() == long.class
+                    ? (Object) (long) id : "frame-" + id;
+        } catch (ReflectiveOperationException e) {
+            throw new AssertionError(e);
+        }
     }
 
     private HappyuCefScripts queue(CefFrame acquired) {

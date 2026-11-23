@@ -16,6 +16,7 @@ import java.util.function.Supplier;
 final class HappyuCefScripts implements Disposable {
     private static final Logger LOG = Logger.getInstance(HappyuCefScripts.class);
     private static final Object MAIN_FRAME = new Object();
+    private static final Object ALL_FRAMES = new Object();
     private static final Method FRAME_IDENTIFIER;
     private static final Method FIND_FRAME;
 
@@ -45,8 +46,10 @@ final class HappyuCefScripts implements Disposable {
         this.executor = executor;
     }
 
-    void requestMainFrame() {
-        enqueue(MAIN_FRAME, new Target(null, true, null));
+    void requestAllFrames() {
+        // Coalesce repeated theme/toggle events. Enumerate frames only on the worker,
+        // including cross-origin frames that JavaScript in the main document cannot reach.
+        enqueue(ALL_FRAMES, new Target(ALL_FRAMES, false, null));
     }
 
     void request(CefFrame callbackFrame) {
@@ -86,6 +89,13 @@ final class HappyuCefScripts implements Disposable {
             CefFrame frame = null;
             try {
                 if (disposed) continue;
+                if (target.id == ALL_FRAMES) {
+                    for (Object id : browser.getFrameIdentifiers()) {
+                        if (disposed) break;
+                        enqueue(id, new Target(id, false, null));
+                    }
+                    continue;
+                }
                 frame = target.main ? browser.getMainFrame() : (CefFrame) FIND_FRAME.invoke(browser, target.id);
                 if (disposed || frame == null || !frame.isValid()) continue;
                 if (target.url != null && !Objects.equals(target.url, frame.getURL())) continue;
