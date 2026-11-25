@@ -1,4 +1,4 @@
-package com.happyu;
+package com.happyu.browser;
 
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.diagnostic.Logger;
@@ -12,7 +12,9 @@ import java.util.Objects;
 import java.util.concurrent.Executor;
 import java.util.function.Supplier;
 
-/** Runs script RPC outside CEF callbacks and the EDT without retaining callback-scoped frames. */
+/**
+ * Runs script RPC outside CEF callbacks and the EDT without retaining callback-scoped frames.
+ */
 final class HappyuCefScripts implements Disposable {
     private static final Logger LOG = Logger.getInstance(HappyuCefScripts.class);
     private static final Object MAIN_FRAME = new Object();
@@ -124,5 +126,6 @@ final class HappyuCefScripts implements Disposable {
         }
     }
 
-    private record Target(Object id, boolean main, String url) { }
+    private record Target(Object id, boolean main, String url) {
+    }
 }

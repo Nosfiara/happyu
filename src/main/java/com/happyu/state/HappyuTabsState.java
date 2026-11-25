@@ -1,4 +1,6 @@
-package com.happyu;
+package com.happyu.state;
+
+import com.happyu.browser.HappyuBrowserPanel;
 
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.components.PersistentStateComponent;
@@ -45,7 +47,7 @@ public final class HappyuTabsState implements PersistentStateComponent<HappyuTab
         closing = false;
     }
 
-    synchronized void update(List<Tab> tabs, int selectedIndex) {
+    public synchronized void update(List<Tab> tabs, int selectedIndex) {
         // Project shutdown disposes contents as well; those removals are not user-closed tabs.
         if (closing) return;
         Snapshot next = new Snapshot();
@@ -55,16 +57,16 @@ public final class HappyuTabsState implements PersistentStateComponent<HappyuTab
         snapshot = copy(next);
     }
 
-    synchronized void updateTab(int index, String url, String title, boolean imagesBlocked) {
+    public synchronized void updateTab(int index, String url, String title, boolean imagesBlocked, boolean sleeping) {
         if (closing || index < 0 || index >= snapshot.tabs.size()) return;
         Tab tab = snapshot.tabs.get(index);
         if (Objects.equals(tab.url, url) && Objects.equals(tab.title, title)
-                && tab.imagesBlocked == imagesBlocked) return;
+                && tab.imagesBlocked == imagesBlocked && tab.sleeping == sleeping) return;
         // Keep serialization snapshots detached, but avoid copying every other tab on each event.
-        snapshot.tabs.set(index, new Tab(url, title, imagesBlocked));
+        snapshot.tabs.set(index, new Tab(url, title, imagesBlocked, sleeping));
     }
 
-    synchronized void updateSelection(int selectedIndex) {
+    public synchronized void updateSelection(int selectedIndex) {
         if (closing) return;
         snapshot.selectedIndex = snapshot.tabs.isEmpty() ? -1
                 : Math.max(0, Math.min(selectedIndex, snapshot.tabs.size() - 1));
@@ -75,7 +77,7 @@ public final class HappyuTabsState implements PersistentStateComponent<HappyuTab
         result.initialized = source.initialized;
         if (source.tabs != null) {
             for (Tab tab : source.tabs) {
-                if (tab != null) result.tabs.add(new Tab(tab.url, tab.title, tab.imagesBlocked));
+                if (tab != null) result.tabs.add(new Tab(tab.url, tab.title, tab.imagesBlocked, tab.sleeping));
             }
         }
         result.selectedIndex = result.tabs.isEmpty() ? -1
@@ -93,13 +95,19 @@ public final class HappyuTabsState implements PersistentStateComponent<HappyuTab
         public String url = HappyuBrowserPanel.HOME_URL;
         public String title = "New Tab";
         public boolean imagesBlocked = true;
+        public boolean sleeping;
 
         public Tab() { }
 
-        Tab(String url, String title, boolean imagesBlocked) {
+        public Tab(String url, String title, boolean imagesBlocked) {
+            this(url, title, imagesBlocked, false);
+        }
+
+        public Tab(String url, String title, boolean imagesBlocked, boolean sleeping) {
             this.url = url == null || url.isBlank() ? HappyuBrowserPanel.HOME_URL : url;
             this.title = title == null || title.isBlank() ? "New Tab" : title;
             this.imagesBlocked = imagesBlocked;
+            this.sleeping = sleeping;
         }
     }
 }

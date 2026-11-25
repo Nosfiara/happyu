@@ -1,4 +1,4 @@
-package com.happyu;
+package com.happyu.browser;
 
 import junit.framework.TestCase;
 

@@ -1,4 +1,7 @@
-package com.happyu;
+package com.happyu.action;
+
+import com.happyu.browser.HappyuBrowserPanel;
+import com.happyu.toolwindow.HappyuToolWindowFactory;
 
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.ActionUpdateThread;
@@ -6,7 +9,7 @@ import com.intellij.openapi.project.DumbAwareAction;
 import com.intellij.openapi.project.Project;
 import org.jetbrains.annotations.NotNull;
 
-public final class OpenHappyuAction extends DumbAwareAction {
+public final class ToggleHappyuImagesAction extends DumbAwareAction {
     @Override
     public void actionPerformed(@NotNull AnActionEvent event) {
         Project project = event.getProject();
@@ -14,7 +17,7 @@ public final class OpenHappyuAction extends DumbAwareAction {
             return;
         }
 
-        HappyuToolWindowFactory.show(project, panel -> { });
+        HappyuToolWindowFactory.show(project, HappyuBrowserPanel::toggleImages);
     }
 
     @Override
