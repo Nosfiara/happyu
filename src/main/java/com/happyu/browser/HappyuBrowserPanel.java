@@ -1,4 +1,4 @@
-package com.happyu;
+package com.happyu.browser;
 
 import com.intellij.ide.ui.LafManagerListener;
 import com.intellij.openapi.Disposable;
@@ -48,18 +48,21 @@ import java.util.Objects;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
-final class HappyuBrowserPanel implements Disposable {
+public final class HappyuBrowserPanel implements Disposable {
     private static final Logger LOG = Logger.getInstance(HappyuBrowserPanel.class);
     private static final String CONTENT_MODE_SCRIPT = loadContentModeScript();
-    static final String HOME_URL = "https://www.baidu.com/";
+    public static final String HOME_URL = "https://www.baidu.com/";
     private static final Pattern MEDIA_URL = Pattern.compile(".*\\.(png|jpe?g|gif|webp|svg|ico|bmp|avif)(\\?.*)?$");
 
-    private final String initialUrl;
+    private final Project project;
     private final Consumer<String> openTab;
     private final Consumer<String> titleChanged;
     private final Runnable stateChanged;
     private String currentUrl;
-    private boolean browserStarted;
+    private volatile boolean browserStarted;
+    private volatile boolean sleeping;
+    private volatile long browserGeneration;
+    private JComponent pageContent;
     private final JPanel root = new JPanel(new BorderLayout());
     private final JBTextField addressField = new JBTextField();
     private final JButton backButton = createIconButton("back.svg", "Back");
@@ -74,6 +77,11 @@ final class HappyuBrowserPanel implements Disposable {
     private volatile String contentModeScript = "";
     private JBCefBrowser browser;
     private JBCefClient client;
+    private CefRequestHandlerAdapter requestHandler;
+    private CefLifeSpanHandlerAdapter lifeSpanHandler;
+    private CefLoadHandlerAdapter loadHandler;
+    private CefDisplayHandlerAdapter displayHandler;
+    private CefKeyboardHandlerAdapter keyboardHandler;
     private volatile HappyuCefScripts scriptUpdates;
     private final CefResourceRequestHandler mediaBlocker = new CefResourceRequestHandlerAdapter() {
         @Override
@@ -82,15 +90,21 @@ final class HappyuBrowserPanel implements Disposable {
         }
     };
 
-    HappyuBrowserPanel(Project project, String initialUrl, boolean imagesBlocked,
+    public HappyuBrowserPanel(Project project, String initialUrl, boolean imagesBlocked,
                        Consumer<String> openTab, Consumer<String> titleChanged, Runnable stateChanged) {
-        this.initialUrl = normalizeUrl(initialUrl);
-        this.currentUrl = this.initialUrl;
+        this(project, initialUrl, imagesBlocked, false, openTab, titleChanged, stateChanged);
+    }
+
+    public HappyuBrowserPanel(Project project, String initialUrl, boolean imagesBlocked, boolean sleeping,
+                       Consumer<String> openTab, Consumer<String> titleChanged, Runnable stateChanged) {
+        this.project = project;
+        this.currentUrl = normalizeUrl(initialUrl);
         this.imagesBlocked = imagesBlocked;
+        this.sleeping = sleeping;
         this.openTab = openTab;
         this.titleChanged = titleChanged;
         this.stateChanged = stateChanged;
-        addressField.setText(this.initialUrl);
+        addressField.setText(currentUrl);
         root.setBorder(BorderFactory.createEmptyBorder());
         root.add(createToolbar(), BorderLayout.NORTH);
         contentModeScript = createContentModeScript();
@@ -99,31 +113,75 @@ final class HappyuBrowserPanel implements Disposable {
         updateToggleButton();
         updateNavigationButtons(false, false);
         applyIdeTheme();
+        if (sleeping) showSleepingPage();
     }
 
-    void ensureBrowserCreated() {
+    public void ensureBrowserCreated() {
         if (disposed || browserStarted) return;
+        boolean wasSleeping = sleeping;
+        sleeping = false;
         browserStarted = true;
-        if (JBCefApp.isSupported()) {
-            createBrowser();
-            applyContentMode();
-        } else {
-            root.add(new JBLabel("JCEF is not supported in this IDE runtime."), BorderLayout.CENTER);
+        browserGeneration++;
+        try {
+            if (JBCefApp.isSupported()) {
+                createBrowser();
+                applyContentMode();
+            } else {
+                setPageContent(new JBLabel("JCEF is not supported in this IDE runtime."));
+            }
+        } catch (RuntimeException e) {
+            browserStarted = false;
+            sleeping = wasSleeping;
+            browserGeneration++;
+            releaseBrowser();
+            setPageContent(new JBLabel("Unable to load this tab. Click Reload to retry."));
+            LOG.warn("Unable to create happyu browser", e);
         }
         root.revalidate();
         root.repaint();
+        if (wasSleeping) stateChanged.run();
     }
 
-    boolean isBrowserStarted() {
+    public boolean isBrowserStarted() {
         return browserStarted;
     }
 
-    String getCurrentUrl() {
+    public String getCurrentUrl() {
         return currentUrl;
     }
 
-    boolean isImagesBlocked() {
+    public boolean isImagesBlocked() {
         return imagesBlocked;
+    }
+
+    public boolean isSleeping() {
+        return sleeping;
+    }
+
+    public boolean sleep() {
+        if (disposed || !browserStarted || sleeping) return false;
+        sleeping = true;
+        browserStarted = false;
+        browserGeneration++;
+        releaseBrowser();
+        updateNavigationButtons(false, false);
+        showSleepingPage();
+        stateChanged.run();
+        return true;
+    }
+
+    private void showSleepingPage() {
+        JBLabel message = new JBLabel("<html>Tab is sleeping.<br>Select this tab or click Reload to load it again.</html>");
+        message.setHorizontalAlignment(JBLabel.CENTER);
+        setPageContent(message);
+    }
+
+    private void setPageContent(JComponent component) {
+        if (pageContent != null) root.remove(pageContent);
+        pageContent = component;
+        root.add(component, BorderLayout.CENTER);
+        root.revalidate();
+        root.repaint();
     }
 
     private void recordUrl(String url) {
@@ -149,7 +207,9 @@ final class HappyuBrowserPanel implements Disposable {
         backButton.addActionListener(event -> goBack());
         forwardButton.addActionListener(event -> goForward());
         reloadButton.addActionListener(event -> {
-            if (browser != null) {
+            if (!browserStarted) {
+                ensureBrowserCreated();
+            } else if (browser != null) {
                 browser.getCefBrowser().reload();
             }
         });
@@ -171,28 +231,28 @@ final class HappyuBrowserPanel implements Disposable {
     }
 
     private void createBrowser() {
-        client = JBCefApp.getInstance().createClient();
-        browser = JBCefBrowser.createBuilder()
-                .setClient(client)
-                .setUrl(initialUrl)
-                .build();
+        long generation = browserGeneration;
+        browser = project.getService(HappyuBrowserClient.class).createBrowser(currentUrl);
+        client = browser.getJBCefClient();
+        Disposer.register(browser, this::removeBrowserHandlers);
         browser.setOpenLinksInExternalBrowser(false);
         scriptUpdates = new HappyuCefScripts(browser.getCefBrowser(), () -> contentModeScript,
                 AppExecutorUtil.getAppExecutorService());
+        Disposer.register(browser, scriptUpdates);
         updateBrowserPageBackground();
 
-        client.addRequestHandler(new CefRequestHandlerAdapter() {
+        client.addRequestHandler(requestHandler = new CefRequestHandlerAdapter() {
             @Override
             public boolean onOpenURLFromTab(CefBrowser cefBrowser, CefFrame frame, String targetUrl, boolean userGesture) {
-                openInNewTab(targetUrl);
+                openInNewTab(targetUrl, generation);
                 return true;
             }
 
             @Override
             public void onRenderProcessTerminated(CefBrowser cefBrowser, TerminationStatus status) {
-                if (!disposed) {
+                if (isCurrentBrowser(generation)) {
                     LOG.warn("happyu renderer terminated: " + status);
-                    runOnUiThread(() -> addressField.setToolTipText(
+                    runOnBrowserUiThread(generation, () -> addressField.setToolTipText(
                             "Renderer stopped: " + status + ". Try Reload or reopen happyu."));
                 }
             }
@@ -205,38 +265,38 @@ final class HappyuBrowserPanel implements Disposable {
                                                                        boolean isDownload,
                                                                        String requestInitiator,
                                                                        BoolRef disableDefaultHandling) {
-                if (disposed || !imagesBlocked) return null;
+                if (!isCurrentBrowser(generation) || !imagesBlocked) return null;
                 return resourceRequestHandlerFor(request.getResourceType(), request.getURL());
             }
         }, browser.getCefBrowser());
 
-        client.addLifeSpanHandler(new CefLifeSpanHandlerAdapter() {
+        client.addLifeSpanHandler(lifeSpanHandler = new CefLifeSpanHandlerAdapter() {
             @Override
             public boolean onBeforePopup(CefBrowser cefBrowser, CefFrame frame, String targetUrl, String targetFrameName) {
-                openInNewTab(targetUrl);
+                openInNewTab(targetUrl, generation);
                 return true;
             }
         }, browser.getCefBrowser());
 
-        client.addLoadHandler(new CefLoadHandlerAdapter() {
+        client.addLoadHandler(loadHandler = new CefLoadHandlerAdapter() {
             @Override
             public void onLoadingStateChange(CefBrowser cefBrowser, boolean isLoading,
                                              boolean canGoBack, boolean canGoForward) {
-                runOnUiThread(() -> updateNavigationButtons(canGoBack, canGoForward));
+                runOnBrowserUiThread(generation, () -> updateNavigationButtons(canGoBack, canGoForward));
             }
 
             @Override
             public void onLoadStart(CefBrowser cefBrowser, CefFrame frame, CefRequest.TransitionType transitionType) {
-                applyContentMode(frame);
+                if (isCurrentBrowser(generation)) applyContentMode(frame);
             }
 
             @Override
             public void onLoadEnd(CefBrowser cefBrowser, CefFrame frame, int httpStatusCode) {
-                if (!disposed && frame != null) {
+                if (isCurrentBrowser(generation) && frame != null) {
                     applyContentMode(frame);
                     if (frame.isMain()) {
                         String url = Objects.toString(frame.getURL(), "");
-                        runOnUiThread(() -> {
+                        runOnBrowserUiThread(generation, () -> {
                             addressField.setText(url);
                             recordUrl(url);
                         });
@@ -247,26 +307,26 @@ final class HappyuBrowserPanel implements Disposable {
             @Override
             public void onLoadError(CefBrowser cefBrowser, CefFrame frame, ErrorCode errorCode,
                                     String errorText, String failedUrl) {
-                if (!disposed && errorCode != ErrorCode.ERR_ABORTED) {
+                if (isCurrentBrowser(generation) && errorCode != ErrorCode.ERR_ABORTED) {
                     LOG.warn("happyu page load failed: " + errorCode + " (" + errorText + ")");
                     if (frame != null && frame.isMain()) {
-                        runOnUiThread(() -> addressField.setToolTipText(
+                        runOnBrowserUiThread(generation, () -> addressField.setToolTipText(
                                 "Load failed: " + errorCode + ". Try Reload."));
                     }
                 }
             }
         }, browser.getCefBrowser());
 
-        client.addDisplayHandler(new CefDisplayHandlerAdapter() {
+        client.addDisplayHandler(displayHandler = new CefDisplayHandlerAdapter() {
             @Override
             public void onTitleChange(CefBrowser cefBrowser, String title) {
-                runOnUiThread(() -> titleChanged.accept(Objects.toString(title, "")));
+                runOnBrowserUiThread(generation, () -> titleChanged.accept(Objects.toString(title, "")));
             }
 
             @Override
             public void onAddressChange(CefBrowser cefBrowser, CefFrame frame, String url) {
-                if (!disposed && frame != null && frame.isMain()) {
-                    runOnUiThread(() -> {
+                if (isCurrentBrowser(generation) && frame != null && frame.isMain()) {
+                    runOnBrowserUiThread(generation, () -> {
                         addressField.setText(Objects.toString(url, ""));
                         addressField.setToolTipText("URL");
                         recordUrl(url);
@@ -275,21 +335,21 @@ final class HappyuBrowserPanel implements Disposable {
             }
         }, browser.getCefBrowser());
 
-        client.addKeyboardHandler(new CefKeyboardHandlerAdapter() {
+        client.addKeyboardHandler(keyboardHandler = new CefKeyboardHandlerAdapter() {
             @Override
             public boolean onPreKeyEvent(CefBrowser cefBrowser, CefKeyboardHandler.CefKeyEvent event, BoolRef isKeyboardShortcut) {
-                if (isToggleShortcut(event)) {
-                    runOnUiThread(HappyuBrowserPanel.this::toggleImages);
+                if (isCurrentBrowser(generation) && isToggleShortcut(event)) {
+                    runOnBrowserUiThread(generation, HappyuBrowserPanel.this::toggleImages);
                     return true;
                 }
                 return false;
             }
         }, browser.getCefBrowser());
 
-        root.add(browser.getComponent(), BorderLayout.CENTER);
+        setPageContent(browser.getComponent());
     }
 
-    void toggleImages() {
+    public void toggleImages() {
         if (disposed) {
             return;
         }
@@ -310,24 +370,26 @@ final class HappyuBrowserPanel implements Disposable {
     }
 
     private void load(String rawUrl) {
-        if (disposed || browser == null) {
-            return;
-        }
-
+        if (disposed) return;
         String url = normalizeUrl(rawUrl);
         recordUrl(url);
         addressField.setText(url);
+        if (!browserStarted) {
+            ensureBrowserCreated();
+            return;
+        }
+        if (browser == null) return;
         updateBrowserPageBackground();
         browser.loadURL(url);
     }
 
-    private void openInNewTab(String rawUrl) {
+    private void openInNewTab(String rawUrl, long generation) {
         String url = normalizeLoadedUrl(rawUrl);
         if (url == null) {
             return;
         }
 
-        runOnUiThread(() -> openTab.accept(url));
+        runOnBrowserUiThread(generation, () -> openTab.accept(url));
     }
 
     private void runOnUiThread(Runnable task) {
@@ -335,6 +397,17 @@ final class HappyuBrowserPanel implements Disposable {
             if (!disposed) {
                 task.run();
             }
+        });
+    }
+
+    private boolean isCurrentBrowser(long generation) {
+        return !disposed && browserStarted && !sleeping && browserGeneration == generation;
+    }
+
+    private void runOnBrowserUiThread(long generation, Runnable task) {
+        if (!isCurrentBrowser(generation)) return;
+        SwingUtilities.invokeLater(() -> {
+            if (isCurrentBrowser(generation)) task.run();
         });
     }
 
@@ -576,24 +649,37 @@ final class HappyuBrowserPanel implements Disposable {
         return addressField;
     }
 
+    private void removeBrowserHandlers() {
+        if (browser != null && client != null && !client.isDisposed()) {
+            CefBrowser cefBrowser = browser.getCefBrowser();
+            if (requestHandler != null) client.removeRequestHandler(requestHandler, cefBrowser);
+            if (lifeSpanHandler != null) client.removeLifeSpanHandler(lifeSpanHandler, cefBrowser);
+            if (loadHandler != null) client.removeLoadHandler(loadHandler, cefBrowser);
+            if (displayHandler != null) client.removeDisplayHandler(displayHandler, cefBrowser);
+            if (keyboardHandler != null) client.removeKeyboardHandler(keyboardHandler, cefBrowser);
+        }
+        requestHandler = null;
+        lifeSpanHandler = null;
+        loadHandler = null;
+        displayHandler = null;
+        keyboardHandler = null;
+    }
+
     @Override
     public void dispose() {
-        if (disposed) {
-            return;
-        }
+        if (disposed) return;
         disposed = true;
+        browserStarted = false;
+        browserGeneration++;
         contentModeScript = "";
-        if (scriptUpdates != null) {
-            scriptUpdates.dispose();
-            scriptUpdates = null;
-        }
-        if (browser != null) {
-            Disposer.dispose(browser);
-            browser = null;
-        }
-        if (client != null) {
-            Disposer.dispose(client);
-            client = null;
-        }
+        releaseBrowser();
+    }
+
+    private void releaseBrowser() {
+        if (scriptUpdates != null) Disposer.dispose(scriptUpdates);
+        if (browser != null) Disposer.dispose(browser);
+        browser = null;
+        client = null;
+        scriptUpdates = null;
     }
 }

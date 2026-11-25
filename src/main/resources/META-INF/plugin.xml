@@ -34,19 +34,30 @@
                     anchor="right"
                     icon="/icons/happyu.svg"
                     canCloseContents="true"
-                    factoryClass="com.happyu.HappyuToolWindowFactory"/>
+                    factoryClass="com.happyu.toolwindow.HappyuToolWindowFactory"/>
+        <projectConfigurable parentId="tools"
+                             instance="com.happyu.settings.HappyuConfigurable"
+                             id="com.happyu.settings"
+                             displayName="happyu"
+                             nonDefaultProject="true"/>
     </extensions>
 
     <actions>
+        <action id="happyu.SleepTab"
+                class="com.happyu.action.SleepHappyuTabAction"
+                text="Sleep Tab"
+                description="Unload this background tab. Reopening it reloads the page and clears its history.">
+            <add-to-group group-id="ToolWindowContextMenu" anchor="first"/>
+        </action>
         <action id="happyu.Open"
-                class="com.happyu.OpenHappyuAction"
+                class="com.happyu.action.OpenHappyuAction"
                 text="Open happyu"
                 description="Open happyu">
             <add-to-group group-id="ToolsMenu" anchor="last"/>
         </action>
 
         <action id="happyu.ToggleImages"
-                class="com.happyu.ToggleHappyuImagesAction"
+                class="com.happyu.action.ToggleHappyuImagesAction"
                 text="Toggle happyu Images"
                 description="Enable or disable images in happyu">
             <keyboard-shortcut keymap="$default" first-keystroke="control alt I"/>

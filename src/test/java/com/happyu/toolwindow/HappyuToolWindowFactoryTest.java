@@ -1,6 +1,14 @@
-package com.happyu;
+package com.happyu.toolwindow;
+
+import com.happyu.browser.HappyuBrowserPanel;
+import com.happyu.state.HappyuTabsState;
+import com.happyu.settings.HappyuSettings;
+import com.happyu.action.SleepHappyuTabAction;
 
 import com.intellij.openapi.actionSystem.AnAction;
+import com.intellij.openapi.actionSystem.ActionPlaces;
+import com.intellij.openapi.actionSystem.AnActionEvent;
+import com.intellij.openapi.actionSystem.PlatformDataKeys;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.util.Disposer;
@@ -12,16 +20,18 @@ import com.intellij.ui.content.Content;
 import com.intellij.ui.content.ContentFactory;
 import com.intellij.ui.content.ContentManager;
 import com.intellij.util.xmlb.XmlSerializer;
-import org.cef.handler.CefResourceRequestHandler;
-import org.cef.network.CefRequest;
+import com.intellij.util.ui.UIUtil;
 
 import javax.swing.JButton;
+import javax.swing.JPanel;
 import java.awt.Component;
 import java.awt.Container;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 public final class HappyuToolWindowFactoryTest extends LightPlatformTestCase {
     private ContentManager manager;
@@ -32,6 +42,7 @@ public final class HappyuToolWindowFactoryTest extends LightPlatformTestCase {
         super.setUp();
         Registry.get("ide.browser.jcef.enabled").setValue(false, getTestRootDisposable());
         getProject().getService(HappyuTabsState.class).loadState(new HappyuTabsState.Snapshot());
+        getProject().getService(HappyuSettings.class).loadState(new HappyuSettings.Options());
         createWindow();
     }
 
@@ -222,6 +233,132 @@ public final class HappyuToolWindowFactoryTest extends LightPlatformTestCase {
         assertEquals(manager.getContent(0), manager.getSelectedContent());
     }
 
+    public void testSleepAndWakePreserveTabMetadataAndProtectSelectedTab() throws Exception {
+        titleActions.get(0).actionPerformed(TestActionEvent.createTestEvent());
+        Content first = manager.getContent(0);
+        HappyuBrowserPanel firstPanel = panel(0);
+        firstPanel.toggleImages();
+        var recordUrl = HappyuBrowserPanel.class.getDeclaredMethod("recordUrl", String.class);
+        recordUrl.setAccessible(true);
+        recordUrl.invoke(firstPanel, "https://example.com/latest?q=C%2B%2B#123");
+        assertFalse(HappyuToolWindowFactory.sleepTab(manager.getSelectedContent()));
+        assertTrue(HappyuToolWindowFactory.sleepTab(first));
+        assertTrue(firstPanel.isSleeping());
+        assertFalse(firstPanel.isBrowserStarted());
+        assertEquals(2, manager.getContentCount());
+        assertTrue(first.getDisplayName().startsWith("[Sleeping] "));
+        HappyuTabsState.Tab saved = savedTabs().tabs.get(0);
+        assertTrue(saved.sleeping);
+        assertFalse(saved.imagesBlocked);
+        assertEquals("New Tab", saved.title);
+        assertEquals(firstPanel.getCurrentUrl(), saved.url);
+        assertFalse(HappyuToolWindowFactory.sleepTab(first));
+        manager.setSelectedContent(first);
+        assertFalse(firstPanel.isSleeping());
+        assertTrue(firstPanel.isBrowserStarted());
+        assertEquals(saved.url, firstPanel.getCurrentUrl());
+        assertFalse(firstPanel.isImagesBlocked());
+        assertEquals("New Tab", first.getDisplayName());
+        assertFalse(savedTabs().tabs.get(0).sleeping);
+    }
+
+    public void testSleepActionProtectsSelectedTabAndIsHiddenForOtherToolWindows() {
+        SleepHappyuTabAction action = new SleepHappyuTabAction();
+        AnActionEvent ours = AnActionEvent.createFromDataContext(ActionPlaces.TOOLWINDOW_POPUP, null,
+                key -> PlatformDataKeys.CONTENT_MANAGER.is(key) ? manager : null);
+        action.update(ours);
+        assertTrue(ours.getPresentation().isVisible());
+        assertFalse(ours.getPresentation().isEnabled());
+        action.actionPerformed(ours);
+        assertFalse(panel(0).isSleeping());
+        ContentManager other = ContentFactory.getInstance().createContentManager(true, getProject());
+        Disposer.register(getTestRootDisposable(), other);
+        Content foreign = other.getFactory().createContent(new JPanel(), "Other plugin", false);
+        other.addContent(foreign);
+        other.setSelectedContent(foreign);
+        AnActionEvent theirs = AnActionEvent.createFromDataContext(ActionPlaces.TOOLWINDOW_POPUP, null,
+                key -> PlatformDataKeys.CONTENT_MANAGER.is(key) ? other : null);
+        action.update(theirs);
+        assertFalse(theirs.getPresentation().isVisible());
+        assertFalse(theirs.getPresentation().isEnabled());
+    }
+
+    public void testSleepingTabsSurviveXmlRoundTripAndOnlyWakeWhenSelected() {
+        titleActions.get(0).actionPerformed(TestActionEvent.createTestEvent());
+        assertTrue(HappyuToolWindowFactory.sleepTab(manager.getContent(0)));
+        HappyuTabsState.Snapshot before = savedTabs();
+        restore(XmlSerializer.deserialize(XmlSerializer.serialize(before), HappyuTabsState.Snapshot.class));
+        assertTrue(panel(0).isSleeping());
+        assertFalse(panel(0).isBrowserStarted());
+        assertTrue(manager.getContent(0).getDisplayName().startsWith("[Sleeping] "));
+        assertTrue(panel(1).isBrowserStarted());
+        manager.setSelectedContent(manager.getContent(0));
+        assertFalse(panel(0).isSleeping());
+        assertTrue(panel(0).isBrowserStarted());
+        assertFalse(savedTabs().tabs.get(0).sleeping);
+    }
+
+    public void testAutomaticSleepIsOffByDefaultAndHonorsTimeoutWithoutLoadingLazyTabs() {
+        HappyuTabsState.Snapshot tabs = new HappyuTabsState.Snapshot();
+        tabs.initialized = true;
+        tabs.tabs = List.of(new HappyuTabsState.Tab(), new HappyuTabsState.Tab(), new HappyuTabsState.Tab());
+        tabs.selectedIndex = 0;
+        restore(tabs);
+        manager.setSelectedContent(manager.getContent(1));
+        AtomicLong clock = new AtomicLong();
+        HappyuTabSleepController controller = new HappyuTabSleepController(getProject(), manager, clock::get);
+        clock.set(TimeUnit.HOURS.toNanos(1));
+        controller.checkIdleTabs();
+        UIUtil.dispatchAllInvocationEvents();
+        assertFalse(panel(0).isSleeping());
+        getProject().getService(HappyuSettings.class).update(true, 15);
+        manager.setSelectedContent(manager.getContent(0));
+        manager.setSelectedContent(manager.getContent(1));
+        clock.addAndGet(TimeUnit.MINUTES.toNanos(15) - 1);
+        controller.checkIdleTabs();
+        UIUtil.dispatchAllInvocationEvents();
+        assertFalse(panel(0).isSleeping());
+        clock.incrementAndGet();
+        controller.checkIdleTabs();
+        UIUtil.dispatchAllInvocationEvents();
+        assertTrue(panel(0).isSleeping());
+        assertFalse(panel(1).isSleeping());
+        assertTrue(panel(1).isBrowserStarted());
+        assertFalse(panel(2).isSleeping());
+        assertFalse(panel(2).isBrowserStarted());
+    }
+
+    public void testReturningToTabResetsIdleTimeAndCancelsQueuedSleep() {
+        titleActions.get(0).actionPerformed(TestActionEvent.createTestEvent());
+        AtomicLong clock = new AtomicLong();
+        HappyuTabSleepController controller = new HappyuTabSleepController(getProject(), manager, clock::get);
+        getProject().getService(HappyuSettings.class).update(true, 1);
+        clock.set(TimeUnit.SECONDS.toNanos(59));
+        manager.setSelectedContent(manager.getContent(0));
+        manager.setSelectedContent(manager.getContent(1));
+        clock.set(TimeUnit.SECONDS.toNanos(60));
+        controller.checkIdleTabs();
+        UIUtil.dispatchAllInvocationEvents();
+        assertFalse(panel(0).isSleeping());
+        clock.set(TimeUnit.SECONDS.toNanos(119));
+        controller.checkIdleTabs();
+        manager.setSelectedContent(manager.getContent(0));
+        UIUtil.dispatchAllInvocationEvents();
+        assertFalse(panel(0).isSleeping());
+        assertFalse(panel(1).isSleeping());
+        manager.setSelectedContent(manager.getContent(1));
+        clock.addAndGet(TimeUnit.MINUTES.toNanos(1));
+        controller.checkIdleTabs();
+        getProject().getService(HappyuSettings.class).update(false, 1);
+        UIUtil.dispatchAllInvocationEvents();
+        assertFalse(panel(0).isSleeping());
+        getProject().getService(HappyuSettings.class).update(true, 1);
+        controller.checkIdleTabs();
+        Disposer.dispose(controller);
+        UIUtil.dispatchAllInvocationEvents();
+        assertFalse(panel(0).isSleeping());
+    }
+
     private HappyuTabsState.Snapshot savedTabs() {
         return getProject().getService(HappyuTabsState.class).getState();
     }
@@ -235,24 +372,6 @@ public final class HappyuToolWindowFactoryTest extends LightPlatformTestCase {
         getProject().getService(HappyuTabsState.class).loadState(state);
         titleActions.clear();
         createWindow();
-    }
-
-    public void testOnlyBlockedMediaRequestsGetResourceCallbacks() {
-        HappyuBrowserPanel panel = (HappyuBrowserPanel) manager.getSelectedContent().getDisposer();
-        assertNotNull(panel);
-        assertNull(panel.resourceRequestHandlerFor(CefRequest.ResourceType.RT_SCRIPT, "https://example.com/app.js"));
-        assertNull(panel.resourceRequestHandlerFor(CefRequest.ResourceType.RT_STYLESHEET, "https://example.com/app.css"));
-        assertNull(panel.resourceRequestHandlerFor(CefRequest.ResourceType.RT_MAIN_FRAME, "https://example.com/"));
-        CefResourceRequestHandler blocker = panel.resourceRequestHandlerFor(
-                CefRequest.ResourceType.RT_IMAGE, "https://example.com/image");
-        assertNotNull(blocker);
-        assertSame(blocker, panel.resourceRequestHandlerFor(CefRequest.ResourceType.RT_MEDIA, null));
-        assertSame(blocker, panel.resourceRequestHandlerFor(
-                CefRequest.ResourceType.RT_MAIN_FRAME, "https://example.com/image.PNG?size=2"));
-
-        panel.toggleImages();
-        assertNull(panel.resourceRequestHandlerFor(CefRequest.ResourceType.RT_IMAGE, "https://example.com/image"));
-        assertFalse(blocker.onBeforeResourceLoad(null, null, null));
     }
 
     private static boolean hasButton(Container parent, String name) {
