@@ -2,7 +2,6 @@ package com.happyu.toolwindow;
 
 import com.happyu.browser.HappyuBrowserPanel;
 import com.happyu.state.HappyuTabsState;
-
 import com.intellij.icons.AllIcons;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.PlatformDataKeys;
@@ -118,15 +117,15 @@ public final class HappyuToolWindowFactory implements ToolWindowFactory, DumbAwa
         ContentManager manager = toolWindow.getContentManager();
         Content content = manager.getFactory().createContent(new JPanel(), "New Tab", false);
         setTitle(content, tab.title);
-        HappyuBrowserPanel panel = new HappyuBrowserPanel(project, tab.url, tab.imagesBlocked, tab.sleeping,
+        HappyuBrowserPanel panel = new HappyuBrowserPanel(project, tab.url, tab.imagesBlocked, tab.sleeping, tab.zoomPercent,
                 target -> ToolWindowManager.getInstance(project).invokeLater(
                         () -> addTab(project, toolWindow, target)),
                 title -> {
                     if (setTitle(content, title)) saveTab(project, manager, content);
                 }, () -> {
-                    refreshTabTitle(content);
-                    saveTab(project, manager, content);
-                });
+            refreshTabTitle(content);
+            saveTab(project, manager, content);
+        });
         content.setComponent(panel.getComponent());
         content.setPreferredFocusableComponent(panel.getPreferredFocusedComponent());
         content.setCloseable(true);
@@ -196,7 +195,8 @@ public final class HappyuToolWindowFactory implements ToolWindowFactory, DumbAwa
             HappyuBrowserPanel panel = content.getUserData(BROWSER_KEY);
             if (panel != null) {
                 if (content == manager.getSelectedContent()) selectedIndex = tabs.size();
-                tabs.add(new HappyuTabsState.Tab(panel.getCurrentUrl(), content.getDescription(), panel.isImagesBlocked(), panel.isSleeping()));
+                tabs.add(new HappyuTabsState.Tab(panel.getCurrentUrl(), content.getDescription(), panel.isImagesBlocked(),
+                        panel.isSleeping(), panel.getZoomPercent()));
             }
         }
         project.getService(HappyuTabsState.class).update(tabs, selectedIndex);
@@ -208,7 +208,7 @@ public final class HappyuToolWindowFactory implements ToolWindowFactory, DumbAwa
         HappyuBrowserPanel panel = content.getUserData(BROWSER_KEY);
         if (index >= 0 && panel != null) {
             project.getService(HappyuTabsState.class).updateTab(index,
-                    panel.getCurrentUrl(), content.getDescription(), panel.isImagesBlocked(), panel.isSleeping());
+                    panel.getCurrentUrl(), content.getDescription(), panel.isImagesBlocked(), panel.isSleeping(), panel.getZoomPercent());
         }
     }
 

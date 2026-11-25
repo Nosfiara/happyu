@@ -1,7 +1,6 @@
 package com.happyu.state;
 
 import com.happyu.browser.HappyuBrowserPanel;
-
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.components.PersistentStateComponent;
 import com.intellij.openapi.components.RoamingType;
@@ -57,13 +56,16 @@ public final class HappyuTabsState implements PersistentStateComponent<HappyuTab
         snapshot = copy(next);
     }
 
-    public synchronized void updateTab(int index, String url, String title, boolean imagesBlocked, boolean sleeping) {
+    public synchronized void updateTab(int index, String url, String title, boolean imagesBlocked, boolean sleeping,
+                                       int zoomPercent) {
         if (closing || index < 0 || index >= snapshot.tabs.size()) return;
+        zoomPercent = HappyuBrowserPanel.normalizeZoomPercent(zoomPercent);
         Tab tab = snapshot.tabs.get(index);
         if (Objects.equals(tab.url, url) && Objects.equals(tab.title, title)
-                && tab.imagesBlocked == imagesBlocked && tab.sleeping == sleeping) return;
+                && tab.imagesBlocked == imagesBlocked && tab.sleeping == sleeping && tab.zoomPercent == zoomPercent)
+            return;
         // Keep serialization snapshots detached, but avoid copying every other tab on each event.
-        snapshot.tabs.set(index, new Tab(url, title, imagesBlocked, sleeping));
+        snapshot.tabs.set(index, new Tab(url, title, imagesBlocked, sleeping, zoomPercent));
     }
 
     public synchronized void updateSelection(int selectedIndex) {
@@ -77,7 +79,8 @@ public final class HappyuTabsState implements PersistentStateComponent<HappyuTab
         result.initialized = source.initialized;
         if (source.tabs != null) {
             for (Tab tab : source.tabs) {
-                if (tab != null) result.tabs.add(new Tab(tab.url, tab.title, tab.imagesBlocked, tab.sleeping));
+                if (tab != null)
+                    result.tabs.add(new Tab(tab.url, tab.title, tab.imagesBlocked, tab.sleeping, tab.zoomPercent));
             }
         }
         result.selectedIndex = result.tabs.isEmpty() ? -1
@@ -96,18 +99,25 @@ public final class HappyuTabsState implements PersistentStateComponent<HappyuTab
         public String title = "New Tab";
         public boolean imagesBlocked = true;
         public boolean sleeping;
+        public int zoomPercent = HappyuBrowserPanel.DEFAULT_ZOOM_PERCENT;
 
-        public Tab() { }
+        public Tab() {
+        }
 
         public Tab(String url, String title, boolean imagesBlocked) {
             this(url, title, imagesBlocked, false);
         }
 
         public Tab(String url, String title, boolean imagesBlocked, boolean sleeping) {
+            this(url, title, imagesBlocked, sleeping, HappyuBrowserPanel.DEFAULT_ZOOM_PERCENT);
+        }
+
+        public Tab(String url, String title, boolean imagesBlocked, boolean sleeping, int zoomPercent) {
             this.url = url == null || url.isBlank() ? HappyuBrowserPanel.HOME_URL : url;
             this.title = title == null || title.isBlank() ? "New Tab" : title;
             this.imagesBlocked = imagesBlocked;
             this.sleeping = sleeping;
+            this.zoomPercent = HappyuBrowserPanel.normalizeZoomPercent(zoomPercent);
         }
     }
 }
