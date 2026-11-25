@@ -41,10 +41,19 @@ public final class HappyuSettings implements PersistentStateComponent<HappyuSett
         project.getMessageBus().syncPublisher(TOPIC).settingsChanged();
     }
 
+    public void setAgentPanelVisible(boolean visible) {
+        synchronized (this) {
+            if (options.agentPanelVisible == visible) return;
+            options.agentPanelVisible = visible;
+        }
+        project.getMessageBus().syncPublisher(TOPIC).settingsChanged();
+    }
+
     private static Options copy(Options source) {
         Options result = new Options();
         result.autoSleepEnabled = source.autoSleepEnabled;
         result.idleMinutes = Math.max(1, Math.min(1440, source.idleMinutes));
+        result.agentPanelVisible = source.agentPanelVisible;
         return result;
     }
 
@@ -55,5 +64,6 @@ public final class HappyuSettings implements PersistentStateComponent<HappyuSett
     public static final class Options {
         public boolean autoSleepEnabled;
         public int idleMinutes = 15;
+        public boolean agentPanelVisible;
     }
 }

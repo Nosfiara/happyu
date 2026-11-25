@@ -1,5 +1,7 @@
 package com.happyu.browser;
 
+import com.happyu.settings.HappyuSettings;
+import com.happyu.ui.HappyuAgentPanel;
 import com.intellij.ide.ui.LafManagerListener;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.diagnostic.Logger;
@@ -65,6 +67,7 @@ public final class HappyuBrowserPanel implements Disposable {
     private volatile boolean sleeping;
     private volatile long browserGeneration;
     private JComponent pageContent;
+    private HappyuAgentPanel agentPanel;
     private final JPanel root = new JPanel(new BorderLayout());
     private final JBTextField addressField = new JBTextField();
     private final JButton backButton = createIconButton("back.svg", "Back");
@@ -120,7 +123,13 @@ public final class HappyuBrowserPanel implements Disposable {
         root.add(createToolbar(), BorderLayout.NORTH);
         contentModeScript = createContentModeScript();
 
-        project.getMessageBus().connect(this).subscribe(LafManagerListener.TOPIC, lafListener);
+        var connection = project.getMessageBus().connect(this);
+        connection.subscribe(LafManagerListener.TOPIC, lafListener);
+        connection.subscribe(HappyuSettings.TOPIC, () -> {
+            if (SwingUtilities.isEventDispatchThread()) updateAgentPanelVisibility();
+            else runOnUiThread(this::updateAgentPanelVisibility);
+        });
+        updateAgentPanelVisibility();
         updateToggleButton();
         updateNavigationButtons(false, false);
         applyIdeTheme();
@@ -246,6 +255,20 @@ public final class HappyuBrowserPanel implements Disposable {
         root.add(component, BorderLayout.CENTER);
         root.revalidate();
         root.repaint();
+    }
+
+    private void updateAgentPanelVisibility() {
+        if (disposed) return;
+        boolean visible = project.getService(HappyuSettings.class).getState().agentPanelVisible;
+        if (agentPanel == null && visible) {
+            agentPanel = new HappyuAgentPanel(() -> project.getService(HappyuSettings.class).setAgentPanelVisible(false));
+            root.add(agentPanel, BorderLayout.SOUTH);
+        }
+        if (agentPanel != null) {
+            agentPanel.setVisible(visible);
+            root.revalidate();
+            root.repaint();
+        }
     }
 
     private void recordUrl(String url) {
@@ -562,6 +585,7 @@ public final class HappyuBrowserPanel implements Disposable {
         addressField.setBackground(UIUtil.getTextFieldBackground());
         addressField.setForeground(UIUtil.getTextFieldForeground());
         setComponentColors(root, background, foreground);
+        if (agentPanel != null) agentPanel.applyTheme();
         updateBrowserPageBackground();
         contentModeScript = createContentModeScript();
         applyContentMode();

@@ -4,11 +4,13 @@ import com.happyu.browser.HappyuBrowserPanel;
 import com.happyu.state.HappyuTabsState;
 import com.happyu.settings.HappyuSettings;
 import com.happyu.action.SleepHappyuTabAction;
+import com.happyu.ui.HappyuAgentPanel;
 
 import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.ActionPlaces;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.PlatformDataKeys;
+import com.intellij.openapi.actionSystem.ToggleAction;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.project.ProjectManager;
 import com.intellij.openapi.util.Disposer;
@@ -26,6 +28,7 @@ import javax.swing.JButton;
 import javax.swing.JPanel;
 import java.awt.Component;
 import java.awt.Container;
+import java.awt.BorderLayout;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.List;
@@ -82,6 +85,35 @@ public final class HappyuToolWindowFactoryTest extends LightPlatformTestCase {
         assertTrue(hasButton(first.getComponent(), "Reload"));
         assertTrue(hasButton(first.getComponent(), "Images Off"));
         assertTrue(hasButton(second.getComponent(), "Images On"));
+    }
+
+    public void testAgentPanelToggleUpdatesRestoredTabsWithoutStartingBackgroundBrowsers() {
+        HappyuTabsState.Snapshot saved = savedTabs();
+        saved.tabs = List.of(new HappyuTabsState.Tab(), new HappyuTabsState.Tab());
+        saved.selectedIndex = 0;
+        restore(saved);
+        ToggleAction toggle = (ToggleAction) titleActions.get(1);
+        assertFalse(toggle.isSelected(TestActionEvent.createTestEvent()));
+        assertNull(agentPanel(0));
+        assertNull(agentPanel(1));
+        assertFalse(panel(1).isBrowserStarted());
+        toggle.setSelected(TestActionEvent.createTestEvent(), true);
+        assertTrue(agentPanel(0).isVisible());
+        assertTrue(agentPanel(1).isVisible());
+        assertFalse(panel(1).isBrowserStarted());
+        HappyuAgentPanel original = agentPanel(0);
+        toggle.setSelected(TestActionEvent.createTestEvent(), false);
+        assertFalse(original.isVisible());
+        assertFalse(agentPanel(1).isVisible());
+        toggle.setSelected(TestActionEvent.createTestEvent(), true);
+        assertSame(original, agentPanel(0));
+        titleActions.get(0).actionPerformed(TestActionEvent.createTestEvent());
+        assertTrue(agentPanel(2).isVisible());
+    }
+
+    private HappyuAgentPanel agentPanel(int index) {
+        JPanel root = (JPanel) panel(index).getComponent();
+        return (HappyuAgentPanel) ((BorderLayout) root.getLayout()).getLayoutComponent(BorderLayout.SOUTH);
     }
 
     public void testClosingAllTabsDisposesPanelsAndNewTabStillWorks() {

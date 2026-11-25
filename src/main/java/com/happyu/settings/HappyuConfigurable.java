@@ -19,6 +19,7 @@ public final class HappyuConfigurable implements SearchableConfigurable {
     private JBCheckBox autoSleep;
     private JSpinner idleMinutes;
     private JBLabel idleLabel;
+    private JBCheckBox agentPanel;
 
     public HappyuConfigurable(Project project) {
         settings = project.getService(HappyuSettings.class);
@@ -40,6 +41,7 @@ public final class HappyuConfigurable implements SearchableConfigurable {
         autoSleep = new JBCheckBox("Automatically sleep inactive background tabs");
         idleMinutes = new JSpinner(new SpinnerNumberModel(15, 1, 1440, 1));
         idleLabel = new JBLabel("Idle time (minutes):");
+        agentPanel = new JBCheckBox("Show Agent-style conversation panel at the bottom");
         autoSleep.addActionListener(event -> {
             idleMinutes.setEnabled(autoSleep.isSelected());
             idleLabel.setEnabled(autoSleep.isSelected());
@@ -51,6 +53,9 @@ public final class HappyuConfigurable implements SearchableConfigurable {
                         + "Unsaved forms, page state and browsing history may be lost.<br>"
                         + "Background media and uploads are not excluded from automatic sleep.<br>"
                         + "Cookies are not explicitly cleared. The selected tab never sleeps.</html>"))
+                .addComponent(agentPanel)
+                .addComponent(new JBLabel("<html>Local conversation mockup. Input is not sent to a model.<br>"
+                        + "You can also toggle it using the happyu title-bar button.</html>"))
                 .addComponentFillVertically(new JPanel(), 0)
                 .getPanel();
         reset();
@@ -62,7 +67,8 @@ public final class HappyuConfigurable implements SearchableConfigurable {
         if (panel == null) return false;
         HappyuSettings.Options saved = settings.getState();
         return autoSleep.isSelected() != saved.autoSleepEnabled
-                || ((Number) idleMinutes.getValue()).intValue() != saved.idleMinutes;
+                || ((Number) idleMinutes.getValue()).intValue() != saved.idleMinutes
+                || agentPanel.isSelected() != saved.agentPanelVisible;
     }
 
     @Override
@@ -78,6 +84,7 @@ public final class HappyuConfigurable implements SearchableConfigurable {
             throw new ConfigurationException("Enter an idle time between 1 and 1440 minutes.");
         }
         settings.update(autoSleep.isSelected(), minutes);
+        settings.setAgentPanelVisible(agentPanel.isSelected());
     }
 
     @Override
@@ -88,6 +95,7 @@ public final class HappyuConfigurable implements SearchableConfigurable {
         idleMinutes.setValue(saved.idleMinutes);
         idleMinutes.setEnabled(saved.autoSleepEnabled);
         idleLabel.setEnabled(saved.autoSleepEnabled);
+        agentPanel.setSelected(saved.agentPanelVisible);
     }
 
     @Override
@@ -96,5 +104,6 @@ public final class HappyuConfigurable implements SearchableConfigurable {
         autoSleep = null;
         idleMinutes = null;
         idleLabel = null;
+        agentPanel = null;
     }
 }
