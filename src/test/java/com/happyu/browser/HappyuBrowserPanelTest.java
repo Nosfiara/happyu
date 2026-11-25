@@ -8,6 +8,7 @@ import org.cef.network.CefRequest;
 import org.cef.browser.CefBrowser;
 import com.intellij.util.ui.UIUtil;
 
+import javax.swing.JComboBox;
 import java.lang.reflect.Proxy;
 import java.util.ArrayDeque;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -82,6 +83,73 @@ public final class HappyuBrowserPanelTest extends LightPlatformTestCase {
         assertTrue(panel.isBrowserStarted());
         assertFalse(panel.isSleeping());
         assertFalse(panel.isImagesBlocked());
+    }
+
+    public void testZoomMenuMarksDefaultAndDoesNotWakeSleepingTab() throws Exception {
+        HappyuBrowserPanel panel = createPanel(true);
+        var zoomField = HappyuBrowserPanel.class.getDeclaredField("zoomCombo");
+        zoomField.setAccessible(true);
+        JComboBox<?> menu = (JComboBox<?>) zoomField.get(panel);
+        assertEquals("100% (Default)", menu.getSelectedItem().toString());
+        assertEquals("Page zoom", menu.getAccessibleContext().getAccessibleName());
+        for (int i = 0; i < menu.getItemCount(); i++) {
+            if (menu.getItemAt(i).toString().equals("125%")) {
+                menu.setSelectedIndex(i);
+                break;
+            }
+        }
+        assertEquals(125, panel.getZoomPercent());
+        assertTrue(panel.isSleeping());
+        assertFalse(panel.isBrowserStarted());
+        panel.ensureBrowserCreated();
+        assertEquals(125, panel.getZoomPercent());
+        assertTrue(panel.sleep());
+        assertEquals(125, panel.getZoomPercent());
+        panel.setZoomPercent(100);
+        assertEquals("100% (Default)", menu.getSelectedItem().toString());
+    }
+
+    public void testZoomChangesNotifyOnceAndIgnoreDisposedPanel() {
+        AtomicInteger changes = new AtomicInteger();
+        HappyuBrowserPanel panel = new HappyuBrowserPanel(getProject(), HappyuBrowserPanel.HOME_URL, true, true,
+                url -> { }, title -> { }, changes::incrementAndGet);
+        Disposer.register(getTestRootDisposable(), panel);
+        panel.setZoomPercent(150);
+        assertEquals(1, changes.get());
+        panel.setZoomPercent(150);
+        assertEquals(1, changes.get());
+        panel.setZoomPercent(0);
+        assertEquals(100, panel.getZoomPercent());
+        assertEquals(2, changes.get());
+        panel.setZoomPercent(501);
+        assertEquals(2, changes.get());
+        Disposer.dispose(panel);
+        panel.setZoomPercent(200);
+        assertEquals(100, panel.getZoomPercent());
+        assertEquals(2, changes.get());
+    }
+
+    public void testReadingNativeZoomUpdatesMenuAndOnlySavesWhenPercentageChanges() throws Exception {
+        AtomicInteger changes = new AtomicInteger();
+        HappyuBrowserPanel panel = new HappyuBrowserPanel(getProject(), HappyuBrowserPanel.HOME_URL, true, true,
+                url -> { }, title -> { }, changes::incrementAndGet);
+        Disposer.register(getTestRootDisposable(), panel);
+        var record = HappyuBrowserPanel.class.getDeclaredMethod("recordZoomPercent", int.class);
+        record.setAccessible(true);
+        var zoomField = HappyuBrowserPanel.class.getDeclaredField("zoomCombo");
+        zoomField.setAccessible(true);
+        JComboBox<?> menu = (JComboBox<?>) zoomField.get(panel);
+        record.invoke(panel, 133);
+        assertEquals(133, panel.getZoomPercent());
+        assertEquals("133%", menu.getSelectedItem().toString());
+        assertEquals(1, changes.get());
+        record.invoke(panel, 133);
+        assertEquals(1, changes.get());
+        record.invoke(panel, 100);
+        assertEquals("100% (Default)", menu.getSelectedItem().toString());
+        assertEquals(2, changes.get());
+        assertTrue(panel.isSleeping());
+        assertFalse(panel.isBrowserStarted());
     }
 
     public void testOnlyBlockedMediaRequestsGetResourceCallbacks() {

@@ -143,6 +143,49 @@ public final class HappyuToolWindowFactoryTest extends LightPlatformTestCase {
         assertEquals(0, savedTabs().selectedIndex);
     }
 
+    public void testZoomPreferencesPersistIndependentlyAndSurviveSleepAndRestore() throws Exception {
+        panel(0).setZoomPercent(80);
+        titleActions.get(0).actionPerformed(TestActionEvent.createTestEvent());
+        assertEquals(100, panel(1).getZoomPercent());
+        panel(1).setZoomPercent(150);
+        var record = HappyuBrowserPanel.class.getDeclaredMethod("recordZoomPercent", int.class);
+        record.setAccessible(true);
+        record.invoke(panel(1), 133);
+        assertTrue(HappyuToolWindowFactory.sleepTab(manager.getContent(0)));
+        assertEquals(80, savedTabs().tabs.get(0).zoomPercent);
+        assertEquals(133, savedTabs().tabs.get(1).zoomPercent);
+        HappyuTabsState.Snapshot saved = savedTabs();
+        HappyuTabsState.Snapshot serialized = XmlSerializer.deserialize(XmlSerializer.serialize(saved),
+                HappyuTabsState.Snapshot.class);
+        saved.tabs.get(0).zoomPercent = 200;
+        assertEquals(80, savedTabs().tabs.get(0).zoomPercent);
+        restore(serialized);
+        assertEquals(80, panel(0).getZoomPercent());
+        assertTrue(panel(0).isSleeping());
+        assertFalse(panel(0).isBrowserStarted());
+        assertEquals(133, panel(1).getZoomPercent());
+        manager.setSelectedContent(manager.getContent(0));
+        assertFalse(panel(0).isSleeping());
+        assertEquals(80, panel(0).getZoomPercent());
+        assertEquals(80, savedTabs().tabs.get(0).zoomPercent);
+        assertEquals(133, savedTabs().tabs.get(1).zoomPercent);
+    }
+
+    public void testMissingAndInvalidSavedZoomUseDefault() {
+        HappyuTabsState.Snapshot saved = savedTabs();
+        var oldTabXml = new org.jdom.Element("Tab").addContent(new org.jdom.Element("option")
+                .setAttribute("name", "url").setAttribute("value", "https://example.com/legacy"));
+        saved.tabs = List.of(XmlSerializer.deserialize(oldTabXml, HappyuTabsState.Tab.class));
+        restore(saved);
+        assertEquals(100, panel(0).getZoomPercent());
+        assertEquals("https://example.com/legacy", panel(0).getCurrentUrl());
+        HappyuTabsState.Snapshot invalid = savedTabs();
+        invalid.tabs.get(0).zoomPercent = -50;
+        restore(invalid);
+        assertEquals(100, panel(0).getZoomPercent());
+        assertEquals(100, savedTabs().tabs.get(0).zoomPercent);
+    }
+
     public void testFrequentSingleTabUpdatesPreserveOtherTabsAndDetachedSnapshots() throws Exception {
         titleActions.get(0).actionPerformed(TestActionEvent.createTestEvent());
         HappyuTabsState.Snapshot before = savedTabs();

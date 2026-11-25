@@ -4,6 +4,7 @@ import com.intellij.ide.ui.LafManagerListener;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.ui.ComboBox;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.util.IconLoader;
 import com.intellij.ui.components.JBLabel;
@@ -52,6 +53,7 @@ public final class HappyuBrowserPanel implements Disposable {
     private static final Logger LOG = Logger.getInstance(HappyuBrowserPanel.class);
     private static final String CONTENT_MODE_SCRIPT = loadContentModeScript();
     public static final String HOME_URL = "https://www.baidu.com/";
+    public static final int DEFAULT_ZOOM_PERCENT = 100;
     private static final Pattern MEDIA_URL = Pattern.compile(".*\\.(png|jpe?g|gif|webp|svg|ico|bmp|avif)(\\?.*)?$");
 
     private final Project project;
@@ -69,6 +71,8 @@ public final class HappyuBrowserPanel implements Disposable {
     private final JButton forwardButton = createIconButton("forward.svg", "Forward");
     private final JButton reloadButton = createIconButton("reload.svg", "Reload");
     private final JButton toggleImagesButton = createIconButton("images-off.svg", "Images Off");
+    private final ComboBox<ZoomOption> zoomCombo = new ComboBox<>();
+    private int zoomPercent;
     private final LafManagerListener lafListener = manager -> runOnUiThread(this::applyIdeTheme);
 
     private volatile boolean imagesBlocked = true;
@@ -82,6 +86,7 @@ public final class HappyuBrowserPanel implements Disposable {
     private CefLoadHandlerAdapter loadHandler;
     private CefDisplayHandlerAdapter displayHandler;
     private CefKeyboardHandlerAdapter keyboardHandler;
+    private HappyuZoomSync zoomSync;
     private volatile HappyuCefScripts scriptUpdates;
     private final CefResourceRequestHandler mediaBlocker = new CefResourceRequestHandlerAdapter() {
         @Override
@@ -91,16 +96,22 @@ public final class HappyuBrowserPanel implements Disposable {
     };
 
     public HappyuBrowserPanel(Project project, String initialUrl, boolean imagesBlocked,
-                       Consumer<String> openTab, Consumer<String> titleChanged, Runnable stateChanged) {
+                              Consumer<String> openTab, Consumer<String> titleChanged, Runnable stateChanged) {
         this(project, initialUrl, imagesBlocked, false, openTab, titleChanged, stateChanged);
     }
 
     public HappyuBrowserPanel(Project project, String initialUrl, boolean imagesBlocked, boolean sleeping,
-                       Consumer<String> openTab, Consumer<String> titleChanged, Runnable stateChanged) {
+                              Consumer<String> openTab, Consumer<String> titleChanged, Runnable stateChanged) {
+        this(project, initialUrl, imagesBlocked, sleeping, DEFAULT_ZOOM_PERCENT, openTab, titleChanged, stateChanged);
+    }
+
+    public HappyuBrowserPanel(Project project, String initialUrl, boolean imagesBlocked, boolean sleeping, int zoomPercent,
+                              Consumer<String> openTab, Consumer<String> titleChanged, Runnable stateChanged) {
         this.project = project;
         this.currentUrl = normalizeUrl(initialUrl);
         this.imagesBlocked = imagesBlocked;
         this.sleeping = sleeping;
+        this.zoomPercent = normalizeZoomPercent(zoomPercent);
         this.openTab = openTab;
         this.titleChanged = titleChanged;
         this.stateChanged = stateChanged;
@@ -117,7 +128,11 @@ public final class HappyuBrowserPanel implements Disposable {
     }
 
     public void ensureBrowserCreated() {
-        if (disposed || browserStarted) return;
+        if (disposed) return;
+        if (browserStarted) {
+            applyZoom();
+            return;
+        }
         boolean wasSleeping = sleeping;
         sleeping = false;
         browserStarted = true;
@@ -156,6 +171,55 @@ public final class HappyuBrowserPanel implements Disposable {
 
     public boolean isSleeping() {
         return sleeping;
+    }
+
+    public int getZoomPercent() {
+        return zoomPercent;
+    }
+
+    public static int normalizeZoomPercent(int percent) {
+        return percent >= 25 && percent <= 500 ? percent : DEFAULT_ZOOM_PERCENT;
+    }
+
+    public void setZoomPercent(int percent) {
+        int value = normalizeZoomPercent(percent);
+        if (disposed || zoomPercent == value) return;
+        zoomPercent = value;
+        updateZoomSelection();
+        applyZoom();
+        stateChanged.run();
+    }
+
+    private void applyZoom() {
+        if (zoomSync != null) zoomSync.cancel();
+        if (!disposed && browser != null) browser.setZoomLevel(zoomPercent / 100.0);
+    }
+
+    private void recordZoomPercent(int percent) {
+        if (disposed || zoomPercent == percent) return;
+        zoomPercent = percent;
+        // Set the stored value first: the combo listener then sees no change and does not write back to CEF.
+        updateZoomSelection();
+        stateChanged.run();
+    }
+
+    private void updateZoomSelection() {
+        ZoomOption selected = new ZoomOption(zoomPercent);
+        for (int i = 0; i < zoomCombo.getItemCount(); i++) {
+            if (selected.equals(zoomCombo.getItemAt(i))) {
+                zoomCombo.setSelectedItem(selected);
+                return;
+            }
+        }
+        zoomCombo.addItem(selected);
+        zoomCombo.setSelectedItem(selected);
+    }
+
+    private record ZoomOption(int percent) {
+        @Override
+        public String toString() {
+            return percent + "%" + (percent == DEFAULT_ZOOM_PERCENT ? " (Default)" : "");
+        }
     }
 
     public boolean sleep() {
@@ -202,6 +266,14 @@ public final class HappyuBrowserPanel implements Disposable {
         navigation.add(reloadButton);
         navigation.add(toggleImagesButton);
 
+        for (int percent : new int[]{25, 33, 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300, 400, 500}) {
+            zoomCombo.addItem(new ZoomOption(percent));
+        }
+        updateZoomSelection();
+        zoomCombo.setToolTipText("Page zoom (default: 100%)");
+        zoomCombo.getAccessibleContext().setAccessibleName("Page zoom");
+        navigation.add(zoomCombo);
+
         addressField.setToolTipText("URL");
 
         backButton.addActionListener(event -> goBack());
@@ -214,6 +286,9 @@ public final class HappyuBrowserPanel implements Disposable {
             }
         });
         toggleImagesButton.addActionListener(event -> toggleImages());
+        zoomCombo.addActionListener(event -> {
+            if (zoomCombo.getSelectedItem() instanceof ZoomOption selected) setZoomPercent(selected.percent());
+        });
         addressField.addActionListener(event -> load(addressField.getText()));
 
         toolbar.add(navigation, BorderLayout.NORTH);
@@ -272,6 +347,11 @@ public final class HappyuBrowserPanel implements Disposable {
 
         client.addLifeSpanHandler(lifeSpanHandler = new CefLifeSpanHandlerAdapter() {
             @Override
+            public void onAfterCreated(CefBrowser cefBrowser) {
+                runOnBrowserUiThread(generation, HappyuBrowserPanel.this::applyZoom);
+            }
+
+            @Override
             public boolean onBeforePopup(CefBrowser cefBrowser, CefFrame frame, String targetUrl, String targetFrameName) {
                 openInNewTab(targetUrl, generation);
                 return true;
@@ -287,7 +367,12 @@ public final class HappyuBrowserPanel implements Disposable {
 
             @Override
             public void onLoadStart(CefBrowser cefBrowser, CefFrame frame, CefRequest.TransitionType transitionType) {
-                if (isCurrentBrowser(generation)) applyContentMode(frame);
+                if (isCurrentBrowser(generation)) {
+                    applyContentMode(frame);
+                    if (frame != null && frame.isMain()) {
+                        runOnBrowserUiThread(generation, HappyuBrowserPanel.this::applyZoom);
+                    }
+                }
             }
 
             @Override
@@ -297,6 +382,7 @@ public final class HappyuBrowserPanel implements Disposable {
                     if (frame.isMain()) {
                         String url = Objects.toString(frame.getURL(), "");
                         runOnBrowserUiThread(generation, () -> {
+                            applyZoom();
                             addressField.setText(url);
                             recordUrl(url);
                         });
@@ -346,6 +432,9 @@ public final class HappyuBrowserPanel implements Disposable {
             }
         }, browser.getCefBrowser());
 
+        zoomSync = new HappyuZoomSync(browser.getComponent(), browser::getZoomLevel,
+                this::recordZoomPercent, AppExecutorUtil.getAppExecutorService());
+        Disposer.register(browser, zoomSync);
         setPageContent(browser.getComponent());
     }
 
@@ -676,10 +765,12 @@ public final class HappyuBrowserPanel implements Disposable {
     }
 
     private void releaseBrowser() {
+        if (zoomSync != null) Disposer.dispose(zoomSync);
         if (scriptUpdates != null) Disposer.dispose(scriptUpdates);
         if (browser != null) Disposer.dispose(browser);
         browser = null;
         client = null;
         scriptUpdates = null;
+        zoomSync = null;
     }
 }
