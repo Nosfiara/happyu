@@ -2,14 +2,17 @@ package com.happyu.toolwindow;
 
 import com.happyu.browser.HappyuBrowserPanel;
 import com.happyu.state.HappyuTabsState;
+import com.happyu.settings.HappyuSettings;
 import com.intellij.icons.AllIcons;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.PlatformDataKeys;
 import com.intellij.openapi.project.DumbAware;
 import com.intellij.openapi.project.DumbAwareAction;
+import com.intellij.openapi.project.DumbAwareToggleAction;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.util.Key;
+import com.intellij.openapi.util.IconLoader;
 import com.intellij.openapi.wm.ToolWindow;
 import com.intellij.openapi.wm.ToolWindowContentUiType;
 import com.intellij.openapi.wm.ToolWindowFactory;
@@ -65,6 +68,17 @@ public final class HappyuToolWindowFactory implements ToolWindowFactory, DumbAwa
             @Override
             public void actionPerformed(@NotNull AnActionEvent event) {
                 addTab(project, toolWindow, HappyuBrowserPanel.HOME_URL);
+            }
+        }, new DumbAwareToggleAction("Agent Conversation Panel", "Show or hide the Agent-style conversation panel",
+                IconLoader.getIcon("/icons/agent.svg", HappyuToolWindowFactory.class)) {
+            @Override
+            public boolean isSelected(@NotNull AnActionEvent event) {
+                return project.getService(HappyuSettings.class).getState().agentPanelVisible;
+            }
+
+            @Override
+            public void setSelected(@NotNull AnActionEvent event, boolean selected) {
+                project.getService(HappyuSettings.class).setAgentPanelVisible(selected);
             }
         }));
         if (saved.initialized) {

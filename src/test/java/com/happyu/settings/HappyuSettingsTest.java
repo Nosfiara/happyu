@@ -25,6 +25,8 @@ public final class HappyuSettingsTest extends LightPlatformTestCase {
     public void testDefaultOptionsAndXmlRoundTripAreDetachedAndValidated() {
         assertFalse(settings.getState().autoSleepEnabled);
         assertEquals(15, settings.getState().idleMinutes);
+        assertFalse(settings.getState().agentPanelVisible);
+        settings.setAgentPanelVisible(true);
         settings.update(true, 22);
         HappyuSettings.Options saved = settings.getState();
         HappyuSettings.Options restored = XmlSerializer.deserialize(XmlSerializer.serialize(saved), HappyuSettings.Options.class);
@@ -33,11 +35,15 @@ public final class HappyuSettingsTest extends LightPlatformTestCase {
         restored.autoSleepEnabled = false;
         assertTrue(settings.getState().autoSleepEnabled);
         assertEquals(22, settings.getState().idleMinutes);
+        assertTrue(settings.getState().agentPanelVisible);
+        saved.agentPanelVisible = false;
+        assertTrue(settings.getState().agentPanelVisible);
         restored.idleMinutes = -10;
         settings.loadState(restored);
         assertEquals(1, settings.getState().idleMinutes);
         settings.update(false, Integer.MAX_VALUE);
         assertEquals(1440, settings.getState().idleMinutes);
+        assertTrue(settings.getState().agentPanelVisible);
     }
 
     public void testOnlyChangedOptionsNotifyLiveControllers() {
@@ -51,6 +57,11 @@ public final class HappyuSettingsTest extends LightPlatformTestCase {
         assertEquals(1, notifications.get());
         settings.update(false, 30);
         assertEquals(2, notifications.get());
+        settings.setAgentPanelVisible(true);
+        settings.setAgentPanelVisible(true);
+        assertEquals(3, notifications.get());
+        settings.setAgentPanelVisible(false);
+        assertEquals(4, notifications.get());
     }
 
     public void testSettingsUiAppliesResetsAndRecreatesSavedOptions() throws Exception {
@@ -59,6 +70,7 @@ public final class HappyuSettingsTest extends LightPlatformTestCase {
             JComponent ui = configurable.createComponent();
             JBCheckBox check = find(ui, JBCheckBox.class);
             JSpinner minutes = find(ui, JSpinner.class);
+            JBCheckBox agent = findAgentOption(ui);
             JBLabel label = find(ui, JBLabel.class);
             assertFalse(check.isSelected());
             assertFalse(minutes.isEnabled());
@@ -66,10 +78,12 @@ public final class HappyuSettingsTest extends LightPlatformTestCase {
             check.doClick();
             assertTrue(minutes.isEnabled());
             minutes.setValue(30);
+            agent.doClick();
             assertTrue(configurable.isModified());
             configurable.apply();
             assertTrue(settings.getState().autoSleepEnabled);
             assertEquals(30, settings.getState().idleMinutes);
+            assertTrue(settings.getState().agentPanelVisible);
             assertFalse(configurable.isModified());
             check.doClick();
             minutes.setValue(5);
@@ -78,6 +92,7 @@ public final class HappyuSettingsTest extends LightPlatformTestCase {
             assertTrue(minutes.isEnabled());
             assertTrue(label.isEnabled());
             assertEquals(30, minutes.getValue());
+            assertTrue(agent.isSelected());
             settings.update(false, 45);
             configurable.reset();
             assertFalse(minutes.isEnabled());
@@ -87,6 +102,7 @@ public final class HappyuSettingsTest extends LightPlatformTestCase {
             ui = configurable.createComponent();
             assertFalse(find(ui, JBCheckBox.class).isSelected());
             assertEquals(45, find(ui, JSpinner.class).getValue());
+            assertTrue(findAgentOption(ui).isSelected());
         } finally {
             configurable.disposeUIResources();
         }
@@ -116,6 +132,17 @@ public final class HappyuSettingsTest extends LightPlatformTestCase {
             if (child instanceof Container container) {
                 T found = find(container, type);
                 if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
+    private static JBCheckBox findAgentOption(Container parent) {
+        for (Component child : parent.getComponents()) {
+            if (child instanceof JBCheckBox check && check.getText().startsWith("Show Agent")) return check;
+            if (child instanceof Container container) {
+                JBCheckBox result = findAgentOption(container);
+                if (result != null) return result;
             }
         }
         return null;

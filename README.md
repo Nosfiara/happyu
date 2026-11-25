@@ -25,6 +25,7 @@ happyu 是一个给 IntelliJ IDEA 用的低调摸鱼浏览器插件。
 - 默认屏蔽图片、favicon、视频等媒体资源，并注入 CSS 隐藏图片、背景图、视频、canvas 等元素。
 - 快捷键 `Ctrl+Alt+I` 切换图片屏蔽状态。macOS 上如果和系统快捷键冲突，可在 IDEA 的 Keymap 里调整 `Toggle happyu Images`。
 - 网页背景色、文字色、链接色会按 IDEA 当前明暗主题重新注入。
+- 点击标题栏的对话图标可开关底部 Agent 风格输入面板，也可在 `Settings -> Tools -> happyu` 中设置；默认关闭，开关状态保存在 `.idea/happyu-settings.xml`。拖动面板顶部横条可调整高度，支持输入、`Enter` 本地发送、`Shift+Enter` 换行及模式/模型外观选择，只用于本地伪装，不连接模型、不发送或持久化输入内容。
 
 标签页状态和休眠标记通过 IDEA 持久化服务独立保存在项目的 `.idea/happyu-tabs.xml`，休眠设置保存在 `.idea/happyu-settings.xml`，不写入 `workspace.xml`。它们保存标签页信息，不保存页面内容、前进后退历史或 Cookie，登录状态仍由 JCEF 管理。
 
