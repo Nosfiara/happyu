@@ -18,6 +18,7 @@ import com.intellij.openapi.wm.ToolWindowContentUiType;
 import com.intellij.openapi.wm.ToolWindowFactory;
 import com.intellij.openapi.wm.ToolWindowManager;
 import com.intellij.openapi.wm.impl.content.BaseLabel;
+import com.intellij.openapi.wm.impl.content.ToolWindowContentUi;
 import com.intellij.ui.content.Content;
 import com.intellij.ui.content.ContentManager;
 import com.intellij.ui.content.ContentManagerEvent;
@@ -63,6 +64,8 @@ public final class HappyuToolWindowFactory implements ToolWindowFactory, DumbAwa
         Disposer.register(manager, () -> manager.removeContentManagerListener(listener));
         toolWindow.setToHideOnEmptyContent(false);
         toolWindow.setContentUiType(ToolWindowContentUiType.TABBED, null);
+        // Keep title actions and their layout space when the mouse leaves the tool window.
+        toolWindow.getComponent().putClientProperty(ToolWindowContentUi.DONT_HIDE_TOOLBAR_IN_HEADER, true);
         toolWindow.setTitleActions(List.of(new DumbAwareAction(
                 "New Tab", "Open a new happyu browser tab", AllIcons.General.Add) {
             @Override
