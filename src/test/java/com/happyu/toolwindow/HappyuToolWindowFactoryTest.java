@@ -52,9 +52,11 @@ public final class HappyuToolWindowFactoryTest extends LightPlatformTestCase {
     private void createWindow() {
         manager = ContentFactory.getInstance().createContentManager(true, getProject());
         Disposer.register(getTestRootDisposable(), manager);
+        JPanel windowComponent = new JPanel();
         ToolWindow window = (ToolWindow) Proxy.newProxyInstance(ToolWindow.class.getClassLoader(),
                 new Class<?>[]{ToolWindow.class}, (proxy, method, args) -> switch (method.getName()) {
                     case "getContentManager" -> manager;
+                    case "getComponent" -> windowComponent;
                     case "setTitleActions" -> {
                         for (Object action : (List<?>) args[0]) titleActions.add((AnAction) action);
                         yield null;

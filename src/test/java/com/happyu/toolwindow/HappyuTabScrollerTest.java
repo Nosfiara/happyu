@@ -7,6 +7,7 @@ import com.intellij.ui.content.ContentFactory;
 import com.intellij.ui.content.ContentManager;
 import com.intellij.ui.layout.migLayout.patched.MigLayout;
 import com.intellij.util.ui.UIUtil;
+import com.intellij.util.ui.JBUI;
 import net.miginfocom.layout.CC;
 import net.miginfocom.layout.LC;
 
@@ -25,6 +26,7 @@ public final class HappyuTabScrollerTest extends LightPlatformTestCase {
     private JPanel tabs;
     private JPanel header;
     private HappyuTabScroller scroller;
+    private long now;
 
     @Override
     protected void setUp() throws Exception {
@@ -57,7 +59,7 @@ public final class HappyuTabScrollerTest extends LightPlatformTestCase {
             header.setLayout(new MigLayout(new LC().insets("0px").gridGap("0px", "0px").fillY()));
             header.add(tabs, new CC().growY());
         }
-        scroller = new HappyuTabScroller(manager, tabs);
+        scroller = new HappyuTabScroller(manager, tabs, () -> now);
         header.addNotify();
         layout(250);
     }
@@ -77,6 +79,11 @@ public final class HappyuTabScrollerTest extends LightPlatformTestCase {
         scroller.doLayout();
         scroller.getViewport().doLayout();
         tabs.doLayout();
+    }
+
+    private void advance(int millis) {
+        now += millis * 1_000_000L;
+        scroller.advanceScroll();
     }
 
     public void testWheelScrollsNativeTabsWithoutSwitchingContentInMigLayout() {
@@ -122,12 +129,19 @@ public final class HappyuTabScrollerTest extends LightPlatformTestCase {
         // Dispatch over a child label, just as a real wheel event bubbles to the scroll pane.
         MouseWheelEvent event = wheel(tabs.getComponent(0), 1, 0);
         tabs.getComponent(0).dispatchEvent(event);
+        assertEquals(0, scroller.getViewport().getViewPosition().x);
+        advance(40);
         assertTrue(scroller.getViewport().getViewPosition().x > 0);
+        assertTrue(scroller.getViewport().getViewPosition().x < JBUI.scale(16) * 3);
+        advance(160);
+        assertEquals(JBUI.scale(16) * 3, scroller.getViewport().getViewPosition().x);
         assertSame(selected, manager.getSelectedContent());
         scroller.dispatchEvent(wheel(scroller, 100, 0));
+        advance(400);
         int max = scroller.getViewport().getViewSize().width - scroller.getViewport().getExtentSize().width;
         assertEquals(max, scroller.getViewport().getViewPosition().x);
         scroller.dispatchEvent(wheel(scroller, -100, 0));
+        advance(400);
         assertEquals(0, scroller.getViewport().getViewPosition().x);
         assertSame(selected, manager.getSelectedContent());
     }
@@ -135,14 +149,139 @@ public final class HappyuTabScrollerTest extends LightPlatformTestCase {
     public void testPreciseWheelAndModifiersAndResize() {
         install(true);
         for (int i = 0; i < 10; i++) scroller.dispatchEvent(wheel(scroller, 0.05, 0));
+        advance(200);
         assertTrue(scroller.getViewport().getViewPosition().x > 0);
         int before = scroller.getViewport().getViewPosition().x;
         scroller.dispatchEvent(wheel(scroller, 1, InputEvent.CTRL_DOWN_MASK));
+        advance(200);
         assertEquals(before, scroller.getViewport().getViewPosition().x);
         layout(2000);
         scroller.dispatchEvent(wheel(scroller, 1, 0));
+        advance(200);
         assertEquals(0, scroller.getViewport().getViewPosition().x);
         assertSame(manager.getContent(0), manager.getSelectedContent());
+    }
+
+    public void testRepeatedWheelAccumulatesAndReversalRespondsImmediately() {
+        install(true);
+        int step = JBUI.scale(16) * 3;
+        scroller.dispatchEvent(wheel(scroller, 1, 0));
+        advance(40);
+        scroller.dispatchEvent(wheel(scroller, 1, 0));
+        advance(200);
+        assertEquals(step * 2, scroller.getViewport().getViewPosition().x);
+
+        scroller.dispatchEvent(wheel(scroller, 1, 0));
+        advance(40);
+        int beforeReverse = scroller.getViewport().getViewPosition().x;
+        scroller.dispatchEvent(wheel(scroller, -1, 0));
+        advance(40);
+        assertTrue(scroller.getViewport().getViewPosition().x < beforeReverse);
+        advance(200);
+        assertEquals(beforeReverse - step, scroller.getViewport().getViewPosition().x);
+        assertSame(manager.getContent(0), manager.getSelectedContent());
+    }
+
+    public void testRepeatedWheelPreservesSpeedInsteadOfRestartingWithAFastFrame() {
+        install(true);
+        scroller.dispatchEvent(wheel(scroller, 1, 0));
+        advance(56);
+        int before = scroller.getViewport().getViewPosition().x;
+        advance(8);
+        int atEvent = scroller.getViewport().getViewPosition().x;
+        int previousFrame = atEvent - before;
+        assertTrue(previousFrame > 0);
+
+        scroller.dispatchEvent(wheel(scroller, 1, 0));
+        assertEquals(atEvent, scroller.getViewport().getViewPosition().x);
+        advance(8);
+        int nextFrame = scroller.getViewport().getViewPosition().x - atEvent;
+        assertTrue(nextFrame > 0);
+        assertTrue("A new wheel event must not produce an abrupt speed jump: " + previousFrame + " -> " + nextFrame,
+                nextFrame <= previousFrame + JBUI.scale(2));
+        advance(400);
+        assertEquals(JBUI.scale(16) * 6, scroller.getViewport().getViewPosition().x);
+        assertSame(manager.getContent(0), manager.getSelectedContent());
+    }
+
+    public void testAnimationUsesElapsedTimeAndKeepsSubpixelPositionBetweenFrames() {
+        install(true);
+        scroller.dispatchEvent(wheel(scroller, 1, 0));
+        for (int i = 0; i < 12; i++) advance(8);
+        int frequentFrames = scroller.getViewport().getViewPosition().x;
+        scroller.reveal(new Rectangle(0, 0, 1, 28));
+        scroller.dispatchEvent(wheel(scroller, 1, 0));
+        advance(96);
+        assertEquals(frequentFrames, scroller.getViewport().getViewPosition().x);
+
+        // A delayed UI frame must settle at the destination, without overshooting or replaying old frames.
+        advance(1000);
+        int destination = JBUI.scale(16) * 3;
+        assertEquals(destination, scroller.getViewport().getViewPosition().x);
+        advance(1000);
+        assertEquals(destination, scroller.getViewport().getViewPosition().x);
+    }
+
+    public void testRevealResizeAndDisposalCancelPendingScroll() {
+        install(true);
+        scroller.dispatchEvent(wheel(scroller, 1, 0));
+        advance(40);
+        Rectangle last = tabs.getComponent(7).getBounds();
+        scroller.reveal(last);
+        int revealed = scroller.getViewport().getViewPosition().x;
+        advance(200);
+        assertEquals(revealed, scroller.getViewport().getViewPosition().x);
+
+        scroller.dispatchEvent(wheel(scroller, -1, 0));
+        layout(2000);
+        advance(200);
+        assertEquals(0, scroller.getViewport().getViewPosition().x);
+
+        layout(250);
+        scroller.dispatchEvent(wheel(scroller, 1, 0));
+        advance(40);
+        Disposer.dispose(scroller);
+        int disposedPosition = scroller.getViewport().getViewPosition().x;
+        advance(200);
+        assertEquals(disposedPosition, scroller.getViewport().getViewPosition().x);
+        assertSame(header, tabs.getParent());
+    }
+
+    public void testSubpixelReversalStopsAnimationAndAccumulatesInTheNewDirection() {
+        install(true);
+        double quarterPixel = 0.25 / (JBUI.scale(16) * 3);
+        scroller.dispatchEvent(wheel(scroller, 1, 0));
+        advance(40);
+        int beforeReverse = scroller.getViewport().getViewPosition().x;
+        scroller.dispatchEvent(wheel(scroller, -quarterPixel, 0));
+        advance(200);
+        assertEquals(beforeReverse, scroller.getViewport().getViewPosition().x);
+        for (int i = 0; i < 3; i++) scroller.dispatchEvent(wheel(scroller, -quarterPixel, 0));
+        advance(200);
+        assertEquals(beforeReverse - 1, scroller.getViewport().getViewPosition().x);
+
+        scroller.dispatchEvent(wheel(scroller, -1, 0));
+        advance(40);
+        int beforeForward = scroller.getViewport().getViewPosition().x;
+        scroller.dispatchEvent(wheel(scroller, quarterPixel, 0));
+        advance(200);
+        assertEquals(beforeForward, scroller.getViewport().getViewPosition().x);
+        for (int i = 0; i < 3; i++) scroller.dispatchEvent(wheel(scroller, quarterPixel, 0));
+        advance(200);
+        assertEquals(beforeForward + 1, scroller.getViewport().getViewPosition().x);
+        assertSame(manager.getContent(0), manager.getSelectedContent());
+    }
+
+    public void testReversalDiscardsOppositeFractionalRemainderEvenWithoutAnimation() {
+        install(true);
+        scroller.reveal(new Rectangle(500, 0, 1, 28));
+        int before = scroller.getViewport().getViewPosition().x;
+        double step = JBUI.scale(16) * 3;
+        scroller.dispatchEvent(wheel(scroller, 0.75 / step, 0));
+        scroller.dispatchEvent(wheel(scroller, -0.5 / step, 0));
+        scroller.dispatchEvent(wheel(scroller, -0.5 / step, 0));
+        advance(200);
+        assertEquals(before - 1, scroller.getViewport().getViewPosition().x);
     }
 
     public void testRevealAndDisposePreserveNativeLabelsAndLayout() {
