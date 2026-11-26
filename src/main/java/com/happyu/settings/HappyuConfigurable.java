@@ -20,6 +20,8 @@ public final class HappyuConfigurable implements SearchableConfigurable {
     private JSpinner idleMinutes;
     private JBLabel idleLabel;
     private JBCheckBox agentPanel;
+    private JBCheckBox agentReading;
+    private JBCheckBox autoHideToolbar;
 
     public HappyuConfigurable(Project project) {
         settings = project.getService(HappyuSettings.class);
@@ -42,6 +44,8 @@ public final class HappyuConfigurable implements SearchableConfigurable {
         idleMinutes = new JSpinner(new SpinnerNumberModel(15, 1, 1440, 1));
         idleLabel = new JBLabel("Idle time (minutes):");
         agentPanel = new JBCheckBox("Show Agent-style conversation panel at the bottom");
+        agentReading = new JBCheckBox("Use Agent conversation style for web reading");
+        autoHideToolbar = new JBCheckBox("Automatically hide the address toolbar");
         autoSleep.addActionListener(event -> {
             idleMinutes.setEnabled(autoSleep.isSelected());
             idleLabel.setEnabled(autoSleep.isSelected());
@@ -56,6 +60,13 @@ public final class HappyuConfigurable implements SearchableConfigurable {
                 .addComponent(agentPanel)
                 .addComponent(new JBLabel("<html>Local conversation mockup. Input is not sent to a model.<br>"
                         + "You can also toggle it using the happyu title-bar button.</html>"))
+                .addComponent(agentReading)
+                .addComponent(new JBLabel("<html>Extract current-page text as an Agent-style response, entirely locally.<br>"
+                        + "Updates dynamically; scroll to load more and expand forum replies.<br>"
+                        + "Toggle off to return to the live page.</html>"))
+                .addComponent(autoHideToolbar)
+                .addComponent(new JBLabel("<html>Move the pointer to the browser's top edge to overlay navigation and the URL without resizing the page.<br>"
+                        + "The toolbar stays visible while editing the URL or using its popup menus.</html>"))
                 .addComponentFillVertically(new JPanel(), 0)
                 .getPanel();
         reset();
@@ -68,7 +79,9 @@ public final class HappyuConfigurable implements SearchableConfigurable {
         HappyuSettings.Options saved = settings.getState();
         return autoSleep.isSelected() != saved.autoSleepEnabled
                 || ((Number) idleMinutes.getValue()).intValue() != saved.idleMinutes
-                || agentPanel.isSelected() != saved.agentPanelVisible;
+                || agentPanel.isSelected() != saved.agentPanelVisible
+                || agentReading.isSelected() != saved.agentReadingMode
+                || autoHideToolbar.isSelected() != saved.autoHideToolbar;
     }
 
     @Override
@@ -85,6 +98,8 @@ public final class HappyuConfigurable implements SearchableConfigurable {
         }
         settings.update(autoSleep.isSelected(), minutes);
         settings.setAgentPanelVisible(agentPanel.isSelected());
+        settings.setAgentReadingMode(agentReading.isSelected());
+        settings.setAutoHideToolbar(autoHideToolbar.isSelected());
     }
 
     @Override
@@ -96,6 +111,8 @@ public final class HappyuConfigurable implements SearchableConfigurable {
         idleMinutes.setEnabled(saved.autoSleepEnabled);
         idleLabel.setEnabled(saved.autoSleepEnabled);
         agentPanel.setSelected(saved.agentPanelVisible);
+        agentReading.setSelected(saved.agentReadingMode);
+        autoHideToolbar.setSelected(saved.autoHideToolbar);
     }
 
     @Override
@@ -105,5 +122,7 @@ public final class HappyuConfigurable implements SearchableConfigurable {
         idleMinutes = null;
         idleLabel = null;
         agentPanel = null;
+        agentReading = null;
+        autoHideToolbar = null;
     }
 }

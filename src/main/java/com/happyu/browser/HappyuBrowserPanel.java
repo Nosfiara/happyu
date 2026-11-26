@@ -2,6 +2,7 @@ package com.happyu.browser;
 
 import com.happyu.settings.HappyuSettings;
 import com.happyu.ui.HappyuAgentPanel;
+import com.happyu.ui.HappyuAutoHideToolbar;
 import com.intellij.ide.ui.LafManagerListener;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.diagnostic.Logger;
@@ -13,7 +14,9 @@ import com.intellij.ui.components.JBLabel;
 import com.intellij.ui.components.JBTextField;
 import com.intellij.ui.jcef.JBCefApp;
 import com.intellij.ui.jcef.JBCefBrowser;
+import com.intellij.ui.jcef.JBCefBrowserBase;
 import com.intellij.ui.jcef.JBCefClient;
+import com.intellij.ui.jcef.JBCefJSQuery;
 import com.intellij.util.ui.JBUI;
 import com.intellij.ui.ColorUtil;
 import com.intellij.util.ui.UIUtil;
@@ -44,6 +47,7 @@ import java.awt.Color;
 import java.awt.FlowLayout;
 import java.awt.event.KeyEvent;
 import java.io.IOException;
+import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
@@ -53,7 +57,8 @@ import java.util.regex.Pattern;
 
 public final class HappyuBrowserPanel implements Disposable {
     private static final Logger LOG = Logger.getInstance(HappyuBrowserPanel.class);
-    private static final String CONTENT_MODE_SCRIPT = loadContentModeScript();
+    private static final String CONTENT_MODE_SCRIPT = loadScript("content-mode.js");
+    private static final String AGENT_READING_SCRIPT = loadScript("agent-reading.js");
     public static final String HOME_URL = "https://www.baidu.com/";
     public static final int DEFAULT_ZOOM_PERCENT = 100;
     private static final Pattern MEDIA_URL = Pattern.compile(".*\\.(png|jpe?g|gif|webp|svg|ico|bmp|avif)(\\?.*)?$");
@@ -68,7 +73,10 @@ public final class HappyuBrowserPanel implements Disposable {
     private volatile long browserGeneration;
     private JComponent pageContent;
     private HappyuAgentPanel agentPanel;
+    private volatile boolean agentReadingMode;
     private final JPanel root = new JPanel(new BorderLayout());
+    private final JComponent toolbar;
+    private final HappyuAutoHideToolbar autoHideToolbar;
     private final JBTextField addressField = new JBTextField();
     private final JButton backButton = createIconButton("back.svg", "Back");
     private final JButton forwardButton = createIconButton("forward.svg", "Forward");
@@ -90,11 +98,14 @@ public final class HappyuBrowserPanel implements Disposable {
     private CefDisplayHandlerAdapter displayHandler;
     private CefKeyboardHandlerAdapter keyboardHandler;
     private HappyuZoomSync zoomSync;
+    private JBCefJSQuery imagePreviewQuery;
+    private volatile String previewImageUrl;
     private volatile HappyuCefScripts scriptUpdates;
     private final CefResourceRequestHandler mediaBlocker = new CefResourceRequestHandlerAdapter() {
         @Override
         public boolean onBeforeResourceLoad(CefBrowser cefBrowser, CefFrame frame, CefRequest request) {
-            return !disposed && imagesBlocked;
+            return !disposed && imagesBlocked && (request == null
+                    || !isPreviewImage(request.getResourceType(), request.getURL()));
         }
     };
 
@@ -118,16 +129,21 @@ public final class HappyuBrowserPanel implements Disposable {
         this.openTab = openTab;
         this.titleChanged = titleChanged;
         this.stateChanged = stateChanged;
+        agentReadingMode = project.getService(HappyuSettings.class).getState().agentReadingMode;
         addressField.setText(currentUrl);
         root.setBorder(BorderFactory.createEmptyBorder());
-        root.add(createToolbar(), BorderLayout.NORTH);
+        root.setFocusable(true);
+        toolbar = createToolbar();
+        autoHideToolbar = new HappyuAutoHideToolbar(root, toolbar);
+        root.add(autoHideToolbar, BorderLayout.NORTH);
+        autoHideToolbar.setAutoHide(project.getService(HappyuSettings.class).getState().autoHideToolbar);
         contentModeScript = createContentModeScript();
 
         var connection = project.getMessageBus().connect(this);
         connection.subscribe(LafManagerListener.TOPIC, lafListener);
         connection.subscribe(HappyuSettings.TOPIC, () -> {
-            if (SwingUtilities.isEventDispatchThread()) updateAgentPanelVisibility();
-            else runOnUiThread(this::updateAgentPanelVisibility);
+            if (SwingUtilities.isEventDispatchThread()) applySettings();
+            else runOnUiThread(this::applySettings);
         });
         updateAgentPanelVisibility();
         updateToggleButton();
@@ -271,6 +287,18 @@ public final class HappyuBrowserPanel implements Disposable {
         }
     }
 
+    private void applySettings() {
+        if (disposed) return;
+        updateAgentPanelVisibility();
+        autoHideToolbar.setAutoHide(project.getService(HappyuSettings.class).getState().autoHideToolbar);
+        boolean enabled = project.getService(HappyuSettings.class).getState().agentReadingMode;
+        if (agentReadingMode == enabled) return;
+        agentReadingMode = enabled;
+        if (!enabled) previewImageUrl = null;
+        contentModeScript = createContentModeScript();
+        applyContentMode();
+    }
+
     private void recordUrl(String url) {
         String value = normalizeLoadedUrl(url);
         if (value != null && !value.equals(currentUrl)) {
@@ -334,6 +362,15 @@ public final class HappyuBrowserPanel implements Disposable {
         client = browser.getJBCefClient();
         Disposer.register(browser, this::removeBrowserHandlers);
         browser.setOpenLinksInExternalBrowser(false);
+        imagePreviewQuery = JBCefJSQuery.create((JBCefBrowserBase) browser);
+        Disposer.register(browser, imagePreviewQuery);
+        imagePreviewQuery.addHandler(url -> {
+            if (!isCurrentBrowser(generation) || !authorizeImagePreview(url)) {
+                return new JBCefJSQuery.Response(null, 1, "Image preview is unavailable");
+            }
+            return new JBCefJSQuery.Response("");
+        });
+        contentModeScript = createContentModeScript();
         scriptUpdates = new HappyuCefScripts(browser.getCefBrowser(), () -> contentModeScript,
                 AppExecutorUtil.getAppExecutorService());
         Disposer.register(browser, scriptUpdates);
@@ -393,6 +430,7 @@ public final class HappyuBrowserPanel implements Disposable {
                 if (isCurrentBrowser(generation)) {
                     applyContentMode(frame);
                     if (frame != null && frame.isMain()) {
+                        previewImageUrl = null;
                         runOnBrowserUiThread(generation, HappyuBrowserPanel.this::applyZoom);
                     }
                 }
@@ -585,6 +623,8 @@ public final class HappyuBrowserPanel implements Disposable {
         addressField.setBackground(UIUtil.getTextFieldBackground());
         addressField.setForeground(UIUtil.getTextFieldForeground());
         setComponentColors(root, background, foreground);
+        // In auto-hide mode the toolbar lives in an owned overlay, outside the page hierarchy.
+        setComponentColors(toolbar, background, foreground);
         if (agentPanel != null) agentPanel.applyTheme();
         updateBrowserPageBackground();
         contentModeScript = createContentModeScript();
@@ -679,21 +719,52 @@ public final class HappyuBrowserPanel implements Disposable {
                 imagesBlocked ? imageBlockCss() : imageRestoreCss()
         );
 
-        return CONTENT_MODE_SCRIPT + "\n('" + escapeJavaScript(css) + "', " + imagesBlocked + ");";
+        String preview = imagePreviewQuery == null ? "undefined"
+                : "url => new Promise((resolve, reject) => { " + imagePreviewQuery.inject("url", "resolve",
+                "function(code, message) { reject(new Error(message)); }") + " })";
+        String reader = agentReadingMode ? AGENT_READING_SCRIPT + "\n({bg:'" + toCssColor(background)
+                + "',fg:'" + toCssColor(foreground) + "',muted:'" + toCssColor(UIUtil.getContextHelpForeground())
+                + "',link:'" + toCssColor(link) + "',border:'" + toCssColor(border) + "',card:'" + toCssColor(card) + "'}, " + preview + ");"
+                : "window.__happyuAgentReading?.dispose();";
+        return CONTENT_MODE_SCRIPT + "\n('" + escapeJavaScript(css) + "', " + imagesBlocked + ");\n" + reader;
     }
 
-    private static String loadContentModeScript() {
-        try (var source = HappyuBrowserPanel.class.getResourceAsStream("/scripts/content-mode.js")) {
-            if (source == null) throw new IllegalStateException("Missing happyu content-mode script");
+    private static String loadScript(String name) {
+        try (var source = HappyuBrowserPanel.class.getResourceAsStream("/scripts/" + name)) {
+            if (source == null) throw new IllegalStateException("Missing happyu script: " + name);
             return new String(source.readAllBytes(), StandardCharsets.UTF_8);
         } catch (IOException e) {
-            throw new IllegalStateException("Unable to load happyu content-mode script", e);
+            throw new IllegalStateException("Unable to load happyu script: " + name, e);
         }
     }
 
     @Nullable CefResourceRequestHandler resourceRequestHandlerFor(CefRequest.ResourceType type, @Nullable String url) {
         if (disposed || !imagesBlocked) return null;
+        if (isPreviewImage(type, url)) return null;
         return isBlockedResource(type, url) ? mediaBlocker : null;
+    }
+
+    boolean authorizeImagePreview(String url) {
+        if (disposed || !agentReadingMode) return false;
+        if (url.isEmpty()) {
+            previewImageUrl = null;
+            return true;
+        }
+        if (url.length() > 8192) return false;
+        try {
+            URI uri = URI.create(url);
+            if (!("http".equalsIgnoreCase(uri.getScheme()) || "https".equalsIgnoreCase(uri.getScheme()))
+                    || uri.getHost() == null || uri.getFragment() != null) return false;
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+        // A single explicitly opened image per browser, cleared on close/navigation/sleep.
+        previewImageUrl = url;
+        return true;
+    }
+
+    private boolean isPreviewImage(CefRequest.ResourceType type, @Nullable String url) {
+        return agentReadingMode && type == CefRequest.ResourceType.RT_IMAGE && url != null && url.equals(previewImageUrl);
     }
 
     private static boolean isBlockedResource(CefRequest.ResourceType type, @Nullable String url) {
@@ -759,6 +830,9 @@ public final class HappyuBrowserPanel implements Disposable {
     }
 
     public @NotNull JComponent getPreferredFocusedComponent() {
+        if (project.getService(HappyuSettings.class).getState().autoHideToolbar) {
+            return pageContent != null && pageContent.isFocusable() ? pageContent : root;
+        }
         return addressField;
     }
 
@@ -785,10 +859,12 @@ public final class HappyuBrowserPanel implements Disposable {
         browserStarted = false;
         browserGeneration++;
         contentModeScript = "";
+        autoHideToolbar.dispose();
         releaseBrowser();
     }
 
     private void releaseBrowser() {
+        previewImageUrl = null;
         if (zoomSync != null) Disposer.dispose(zoomSync);
         if (scriptUpdates != null) Disposer.dispose(scriptUpdates);
         if (browser != null) Disposer.dispose(browser);
@@ -796,5 +872,6 @@ public final class HappyuBrowserPanel implements Disposable {
         client = null;
         scriptUpdates = null;
         zoomSync = null;
+        imagePreviewQuery = null;
     }
 }

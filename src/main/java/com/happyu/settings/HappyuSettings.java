@@ -49,11 +49,29 @@ public final class HappyuSettings implements PersistentStateComponent<HappyuSett
         project.getMessageBus().syncPublisher(TOPIC).settingsChanged();
     }
 
+    public void setAgentReadingMode(boolean enabled) {
+        synchronized (this) {
+            if (options.agentReadingMode == enabled) return;
+            options.agentReadingMode = enabled;
+        }
+        project.getMessageBus().syncPublisher(TOPIC).settingsChanged();
+    }
+
+    public void setAutoHideToolbar(boolean enabled) {
+        synchronized (this) {
+            if (options.autoHideToolbar == enabled) return;
+            options.autoHideToolbar = enabled;
+        }
+        project.getMessageBus().syncPublisher(TOPIC).settingsChanged();
+    }
+
     private static Options copy(Options source) {
         Options result = new Options();
         result.autoSleepEnabled = source.autoSleepEnabled;
         result.idleMinutes = Math.max(1, Math.min(1440, source.idleMinutes));
         result.agentPanelVisible = source.agentPanelVisible;
+        result.agentReadingMode = source.agentReadingMode;
+        result.autoHideToolbar = source.autoHideToolbar;
         return result;
     }
 
@@ -65,5 +83,7 @@ public final class HappyuSettings implements PersistentStateComponent<HappyuSett
         public boolean autoSleepEnabled;
         public int idleMinutes = 15;
         public boolean agentPanelVisible;
+        public boolean agentReadingMode;
+        public boolean autoHideToolbar;
     }
 }

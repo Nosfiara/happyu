@@ -1,5 +1,6 @@
 package com.happyu.browser;
 
+import com.happyu.settings.HappyuSettings;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.util.registry.Registry;
 import com.intellij.testFramework.LightPlatformTestCase;
@@ -14,6 +15,30 @@ import java.util.ArrayDeque;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public final class HappyuBrowserPanelTest extends LightPlatformTestCase {
+    public void testToolbarAutoHideUpdatesLiveWithoutStartingSleepingBrowser() throws Exception {
+        HappyuSettings settings = getProject().getService(HappyuSettings.class);
+        settings.loadState(new HappyuSettings.Options());
+        HappyuBrowserPanel panel = createPanel(true);
+        var field = HappyuBrowserPanel.class.getDeclaredField("addressField");
+        field.setAccessible(true);
+        javax.swing.JComponent address = (javax.swing.JComponent) field.get(panel);
+        javax.swing.JComponent toolbar = (javax.swing.JComponent) address.getParent();
+        try {
+            assertTrue(toolbar.isVisible());
+            assertSame(address, panel.getPreferredFocusedComponent());
+            settings.setAutoHideToolbar(true);
+            assertFalse(toolbar.isVisible());
+            assertNotSame(address, panel.getPreferredFocusedComponent());
+            assertFalse(panel.isBrowserStarted());
+            assertTrue(panel.isSleeping());
+            settings.setAutoHideToolbar(false);
+            assertTrue(toolbar.isVisible());
+            assertSame(address, panel.getPreferredFocusedComponent());
+        } finally {
+            settings.setAutoHideToolbar(false);
+        }
+    }
+
     private HappyuBrowserPanel createPanel(boolean sleeping) {
         Registry.get("ide.browser.jcef.enabled").setValue(false, getTestRootDisposable());
         HappyuBrowserPanel panel = new HappyuBrowserPanel(getProject(), "https://example.com/last", true, sleeping,
@@ -83,6 +108,34 @@ public final class HappyuBrowserPanelTest extends LightPlatformTestCase {
         assertTrue(panel.isBrowserStarted());
         assertFalse(panel.isSleeping());
         assertFalse(panel.isImagesBlocked());
+    }
+
+    public void testReadingModeUpdatesScriptWithoutWakingSleepingTabsOrChangingComposerPreference() throws Exception {
+        HappyuSettings settings = getProject().getService(HappyuSettings.class);
+        settings.loadState(new HappyuSettings.Options());
+        HappyuBrowserPanel panel = createPanel(true);
+        var script = HappyuBrowserPanel.class.getDeclaredField("contentModeScript");
+        script.setAccessible(true);
+        assertTrue(((String) script.get(panel)).endsWith("window.__happyuAgentReading?.dispose();"));
+        try {
+            settings.setAgentReadingMode(true);
+            String enabled = (String) script.get(panel);
+            assertTrue(enabled.contains("Agent · 阅读"));
+            assertTrue(enabled.contains("getComputedStyle(node)"));
+            assertTrue(panel.isSleeping());
+            assertFalse(panel.isBrowserStarted());
+            assertFalse(settings.getState().agentPanelVisible);
+            settings.update(true, 30);
+            assertSame(enabled, script.get(panel));
+            panel.ensureBrowserCreated();
+            assertTrue(panel.isBrowserStarted());
+            assertTrue(((String) script.get(panel)).contains("Agent · 阅读"));
+            settings.setAgentReadingMode(false);
+            assertTrue(((String) script.get(panel)).endsWith("window.__happyuAgentReading?.dispose();"));
+        } finally {
+            settings.setAgentReadingMode(false);
+            settings.update(false, 15);
+        }
     }
 
     public void testZoomMenuMarksDefaultAndDoesNotWakeSleepingTab() throws Exception {
@@ -170,5 +223,44 @@ public final class HappyuBrowserPanelTest extends LightPlatformTestCase {
         panel.toggleImages();
         assertNull(panel.resourceRequestHandlerFor(CefRequest.ResourceType.RT_IMAGE, "https://example.com/image"));
         assertFalse(blocker.onBeforeResourceLoad(null, null, null));
+    }
+
+    public void testImagePreviewOnlyAllowsOneExplicitImageInItsOwnTabAndClearsOnCloseOrDisable() {
+        HappyuSettings settings = getProject().getService(HappyuSettings.class);
+        settings.setAgentReadingMode(true);
+        HappyuBrowserPanel panel = createPanel(true);
+        HappyuBrowserPanel otherTab = createPanel(true);
+        String first = "https://example.com/first.png?size=large";
+        String second = "https://example.com/second.png";
+        try {
+            assertNotNull(panel.resourceRequestHandlerFor(CefRequest.ResourceType.RT_IMAGE, first));
+            assertTrue(panel.authorizeImagePreview(first));
+            assertNull(panel.resourceRequestHandlerFor(CefRequest.ResourceType.RT_IMAGE, first));
+            assertNotNull(otherTab.resourceRequestHandlerFor(CefRequest.ResourceType.RT_IMAGE, first));
+            assertNotNull(panel.resourceRequestHandlerFor(CefRequest.ResourceType.RT_IMAGE, second));
+            assertNotNull(panel.resourceRequestHandlerFor(CefRequest.ResourceType.RT_MAIN_FRAME, first));
+            assertNotNull(panel.resourceRequestHandlerFor(CefRequest.ResourceType.RT_MEDIA, first));
+            assertTrue(panel.isImagesBlocked());
+            assertTrue(panel.authorizeImagePreview(second));
+            assertNotNull(panel.resourceRequestHandlerFor(CefRequest.ResourceType.RT_IMAGE, first));
+            assertNull(panel.resourceRequestHandlerFor(CefRequest.ResourceType.RT_IMAGE, second));
+            for (String invalid : new String[]{"javascript:alert(1)", "file:///private.png", "data:image/png;base64,abc",
+                    "https:///missing-host.png", "https://example.com/img.png#fragment", "x".repeat(8193)}) {
+                assertFalse(panel.authorizeImagePreview(invalid));
+            }
+            assertTrue(panel.authorizeImagePreview(""));
+            assertNotNull(panel.resourceRequestHandlerFor(CefRequest.ResourceType.RT_IMAGE, second));
+            assertTrue(panel.authorizeImagePreview(first));
+            settings.setAgentReadingMode(false);
+            assertNotNull(panel.resourceRequestHandlerFor(CefRequest.ResourceType.RT_IMAGE, first));
+            assertFalse(panel.authorizeImagePreview(first));
+            settings.setAgentReadingMode(true);
+            assertNotNull(panel.resourceRequestHandlerFor(CefRequest.ResourceType.RT_IMAGE, first));
+            assertTrue(panel.authorizeImagePreview(first));
+            Disposer.dispose(panel);
+            assertFalse(panel.authorizeImagePreview(first));
+        } finally {
+            settings.setAgentReadingMode(false);
+        }
     }
 }

@@ -116,6 +116,31 @@ public final class HappyuToolWindowFactoryTest extends LightPlatformTestCase {
         return (HappyuAgentPanel) ((BorderLayout) root.getLayout()).getLayoutComponent(BorderLayout.SOUTH);
     }
 
+    public void testReadingModeActionPersistsIndependentlyAndLeavesLazyBrowsersUnloaded() throws Exception {
+        HappyuTabsState.Snapshot saved = savedTabs();
+        saved.tabs = List.of(new HappyuTabsState.Tab(), new HappyuTabsState.Tab());
+        saved.selectedIndex = 0;
+        restore(saved);
+        HappyuSettings settings = getProject().getService(HappyuSettings.class);
+        ToggleAction reading = (ToggleAction) titleActions.get(2);
+        reading.setSelected(TestActionEvent.createTestEvent(), true);
+        assertTrue(reading.isSelected(TestActionEvent.createTestEvent()));
+        assertTrue(settings.getState().agentReadingMode);
+        assertFalse(settings.getState().agentPanelVisible);
+        assertFalse(panel(1).isBrowserStarted());
+        Disposer.dispose(manager);
+        titleActions.clear();
+        createWindow();
+        assertTrue(((ToggleAction) titleActions.get(2)).isSelected(TestActionEvent.createTestEvent()));
+        assertFalse(panel(1).isBrowserStarted());
+        assertNull(agentPanel(0));
+        var script = HappyuBrowserPanel.class.getDeclaredField("contentModeScript");
+        script.setAccessible(true);
+        assertTrue(((String) script.get(panel(1))).contains("Agent · 阅读"));
+        ((ToggleAction) titleActions.get(2)).setSelected(TestActionEvent.createTestEvent(), false);
+        assertTrue(((String) script.get(panel(1))).endsWith("window.__happyuAgentReading?.dispose();"));
+    }
+
     public void testClosingAllTabsDisposesPanelsAndNewTabStillWorks() {
         Content first = manager.getSelectedContent();
         assertNotNull(first);
