@@ -30,6 +30,60 @@ const text = page => page.evaluate(() => __happyuAgentReading.content.textConten
 const tiebaThread = readFileSync(join(__dirname,'fixtures/tieba-virtual-thread.html'),'utf8');
 const classicThread = readFileSync(join(__dirname,'fixtures/tieba-classic-thread.html'),'utf8');
 
+test('Tieba reply titles distinguish total from loaded and retain known totals across incremental loads', async t => {
+  const page=await fixture(t,tiebaThread,'https://tieba.baidu.com/p/counts');
+  await page.evaluate(()=>{
+    document.querySelector('.show-more-lzl').onclick=()=>{
+      const group=document.querySelector('.lzl-wrapper');
+      group.insertAdjacentHTML('beforeend','<div class="pb-lzl-item"><div class="pb-rich-text">新增回复</div></div>');
+      group.querySelector('.show-more-lzl').textContent='展开更多回复';
+    };
+  });
+  await enable(page);await ready(page);
+  const reader=page.locator('#happyu-agent-reading');
+  const heading=reader.locator('.replies-card>summary');
+  assert.equal(await heading.textContent(),'65 条回复 · 已加载 2 条');
+  await heading.click();
+  await reader.getByRole('button',{name:'展开 65 条回复',exact:true}).click();
+  await page.waitForFunction(()=>__happyuAgentReading.content.querySelectorAll('.reply-bubble').length===3);
+  assert.equal(await heading.textContent(),'65 条回复 · 已加载 3 条');
+  assert.equal(await reader.locator('.replies-card').evaluate(n=>n.open),true);
+  await page.evaluate(()=>document.querySelector('.lzl-wrapper').setAttribute('data-total-count','54'));
+  await page.waitForFunction(()=>__happyuAgentReading.content.querySelector('.replies-card>summary').textContent.includes('54 条回复'));
+  assert.equal(await heading.textContent(),'54 条回复 · 已加载 3 条');
+});
+
+test('classic metadata provides the complete reply total and refreshes independently of loaded reply count', async t => {
+  const page=await fixture(t,classicThread,'https://tieba.baidu.com/p/classic-counts');
+  await enable(page);await ready(page);
+  const heading=page.locator('#happyu-agent-reading .replies-card>summary');
+  assert.equal(await heading.textContent(),'3 条回复 · 已加载 2 条');
+  await page.evaluate(()=>document.querySelector('[data-pid="classic-3"] .j_lzl_container').setAttribute('data-field','{"total_num":53}'));
+  await page.waitForFunction(()=>__happyuAgentReading.content.querySelector('.replies-card>summary').textContent.includes('53 条回复'));
+  assert.equal(await heading.textContent(),'53 条回复 · 已加载 2 条');
+});
+
+test('remaining counts are added to loaded replies and unrelated nested/neighbor counts never become totals', async t => {
+  const page=await fixture(t,'<main><div class="l_post" data-floor="1"><div class="reply-list">'
+    +'<div class="reply-item">第一条</div><div class="reply-item">第二条</div>'
+    +'<button id="more">还有51条回复，点击查看</button></div></div>'
+    +'<div class="l_post" data-floor="2"><div class="reply-list"><div class="reply-item">正文提到999条回复'
+    +'<button>查看 99 条回复</button></div></div></div></main>');
+  await page.evaluate(()=>document.querySelector('#more').onclick=()=>{
+    document.querySelector('.reply-list').insertAdjacentHTML('afterbegin','<div class="reply-item">新加载一条</div>');
+    document.querySelector('#more').textContent='还有50条回复，点击查看';
+  });
+  await enable(page);await ready(page);
+  const reader=page.locator('#happyu-agent-reading');
+  assert.deepEqual(await reader.locator('.replies-card>summary').allTextContents(),[
+    '53 条回复 · 已加载 2 条','楼中楼回复 · 已加载 1 条']);
+  await reader.locator('.replies-card').first().evaluate(n=>n.open=true);
+  await reader.getByRole('button',{name:'还有51条回复，点击查看'}).click();
+  await page.waitForFunction(()=>__happyuAgentReading.content.querySelectorAll('.reply-bubble').length===4);
+  assert.deepEqual(await reader.locator('.replies-card>summary').allTextContents(),[
+    '53 条回复 · 已加载 3 条','楼中楼回复 · 已加载 1 条']);
+});
+
 test('same-document links jump to copied IDs/named anchors, respect the toolbar and never scroll the original', async t => {
   const paragraphs=Array.from({length:50},(_,i)=>'<p>正文段落 '+i+'。阅读目录定位测试。</p>').join('');
   const page=await fixture(t,'<main id="article"><a href="#chapter">普通目录</a> <a href="#%E7%AB%A0%E8%8A%82%20%5B1%5D">命名目录</a> '

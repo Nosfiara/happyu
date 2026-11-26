@@ -440,6 +440,49 @@
       const match = label.match(/^(?:(\d+)\s*(?:条)?回复|回复\s*[（(]\s*(\d+)\s*[）)])$/);
       return match && Number(match[1] || match[2]) > 0 ? Number(match[1] || match[2]) : null;
     };
+    const replyNumber = value => /^\d{1,9}$/.test(String(value ?? '').trim()) ? Number(value) : null;
+    const replyLabelCount = value => {
+      const label = String(value || '').trim();
+      if (label.length > 80) return null;
+      const remaining = label.match(/^(?:还有|剩余)\s*(\d{1,9})\s*条(?:回复|评论)/);
+      if (remaining) return {remaining: Number(remaining[1])};
+      const total = label.match(/^(?:(?:展开|查看|显示|全部|共)\s*)?(\d{1,9})\s*(?:条)?(?:楼中楼)?(?:回复|评论)\s*$/)
+        || label.match(/^(?:回复|评论)\s*[（(]\s*(\d{1,9})\s*[）)]\s*$/);
+      return total ? {total: Number(total[1])} : null;
+    };
+    const replyTotals = new WeakMap();
+    const prepareReplyTotal = (node, details, action, metadata) => {
+      let declared = replyNumber(metadata?.total_num);
+      for (const attribute of ['data-total-count', 'data-total', 'data-reply-count']) {
+        if (declared === null) declared = replyNumber(node.getAttribute(attribute));
+      }
+      const actionGroup = action?.closest(replyGroups);
+      const hint = action && !action.closest(replies) && (!actionGroup || actionGroup === node)
+        ? replyLabelCount(action.textContent) : null;
+      const previous = state.renderedContext === state.context
+        ? replyNumber(state.cards.get(nodeKey(node))?.dataset.replyTotal) : null;
+      replyTotals.set(details, {declared, hint, previous});
+    };
+    const finishReplyCounts = fragment => {
+      for (const details of fragment.querySelectorAll('.replies-card')) {
+        const loaded = Number(details.dataset.replyCount || 0);
+        const info = replyTotals.get(details);
+        let total = info?.declared ?? null;
+        if (total === null) {
+          let hint = info?.hint;
+          for (const button of details.querySelectorAll('button[data-reader-action]')) {
+            if (button.closest('.replies-card') !== details || button.closest('.reply-bubble')) continue;
+            const count = replyLabelCount(button.textContent);
+            if (count) { hint = count; break; }
+          }
+          total = hint ? hint.total ?? loaded + hint.remaining : info?.previous ?? null;
+        }
+        if (total !== null) details.dataset.replyTotal = Math.max(total, loaded);
+        details.querySelector('summary').textContent = total === null
+          ? '楼中楼回复 · 已加载 ' + loaded + ' 条'
+          : Math.max(total, loaded) + ' 条回复 · 已加载 ' + loaded + ' 条';
+      }
+    };
     const isReplyClose = node => state.replyPane?.contains(node) && node.matches(controls)
       && /^(?:关闭|关闭回复|close|×|✕)$/i.test((node.getAttribute('aria-label') || node.getAttribute('title') || node.textContent).trim());
     const isReadAction = node => {
@@ -659,13 +702,14 @@
         const visible = !node.hidden && node.getAttribute('aria-hidden') !== 'true' && computed.display !== 'none'
           && computed.visibility !== 'hidden' && computed.visibility !== 'collapse';
         const group = node.matches(replyGroups);
-        if (group && state.tiebaClassic && !node.querySelector(replies)) {
+        let replyMetadata;
+        if (group) {
           const field = node.getAttribute('data-field');
-          let metadata;
           if (field && field.length < 8192) {
-            try { metadata = JSON.parse(field); } catch (_) { /* Optional reply count. */ }
+            try { replyMetadata = JSON.parse(field); } catch (_) { /* Optional reply count. */ }
           }
-          if (metadata?.total_num != null && Number(metadata.total_num) === 0) {
+          if (state.tiebaClassic && replyMetadata?.total_num != null && Number(replyMetadata.total_num) === 0
+              && !node.querySelector(replies)) {
             state.advance(node, false, output);
             return;
           }
@@ -684,6 +728,7 @@
             const {details, summary} = card(node, 'replies-card', '楼中楼回复 · 展开查看', output,
               Boolean(owner && owner === state.activeReplyOwner));
             const action = findReplyAction(node);
+            prepareReplyTotal(node, details, action, replyMetadata);
             // Already loaded replies expand locally; loading more stays a separate explicit action.
             if (action && !node.matches('.lzl-wrapper')
                 && !(state.tiebaClassic && node.querySelector('.lzl_single_post'))) summary.dataset.readerAction = registerAction(action);
@@ -739,7 +784,6 @@
             if (container) {
               const count = Number(container.dataset.replyCount || 0) + 1;
               container.dataset.replyCount = count;
-              container.querySelector('summary').textContent = '楼中楼回复 · ' + count + ' 条';
             }
             output = make('div', 'reply-bubble', '', output);
             if (state.tiebaRoot && node.matches('.pb-lzl-item')) {
@@ -817,6 +861,7 @@
       if (state.cursor && state.nodes < 20000 && state.characters < 120000) state.schedule();
       else {
         const limited = Boolean(state.cursor);
+        finishReplyCounts(state.fragment);
         const references = element => [...element.querySelectorAll('[data-reader-image], [data-reader-target]')]
           .map(node => node.dataset.readerImage || node.dataset.readerTarget).join('\n');
         const signature = state.fragment.textContent + references(state.fragment);
@@ -1072,6 +1117,7 @@
     state.observer.observe(document.documentElement, {childList: true, characterData: true, subtree: true,
       attributes: true, attributeOldValue: true,
       attributeFilter: ['class', 'hidden', 'aria-hidden', 'style', 'href', 'open', 'id', 'name', 'inert', 'data-floor', 'data-field', 'data-id', 'data-post-id',
+        'data-total-count', 'data-total', 'data-reply-count',
         'src', 'srcset', 'data-src', 'data-original', 'data-original-src', 'data-lazy-src', 'data-actualsrc', 'data-srcset', 'alt']});
     state.scrollSource = (explicit = false) => {
       if (state.disposed || document.hidden || !state.hasSnapshot) return;
