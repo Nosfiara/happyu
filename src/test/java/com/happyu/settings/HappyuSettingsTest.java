@@ -26,7 +26,11 @@ public final class HappyuSettingsTest extends LightPlatformTestCase {
         assertFalse(settings.getState().autoSleepEnabled);
         assertEquals(15, settings.getState().idleMinutes);
         assertFalse(settings.getState().agentPanelVisible);
+        assertFalse(settings.getState().agentReadingMode);
+        assertFalse(settings.getState().autoHideToolbar);
         settings.setAgentPanelVisible(true);
+        settings.setAgentReadingMode(true);
+        settings.setAutoHideToolbar(true);
         settings.update(true, 22);
         HappyuSettings.Options saved = settings.getState();
         HappyuSettings.Options restored = XmlSerializer.deserialize(XmlSerializer.serialize(saved), HappyuSettings.Options.class);
@@ -36,14 +40,21 @@ public final class HappyuSettingsTest extends LightPlatformTestCase {
         assertTrue(settings.getState().autoSleepEnabled);
         assertEquals(22, settings.getState().idleMinutes);
         assertTrue(settings.getState().agentPanelVisible);
+        assertTrue(settings.getState().agentReadingMode);
+        assertTrue(settings.getState().autoHideToolbar);
         saved.agentPanelVisible = false;
+        saved.agentReadingMode = false;
+        saved.autoHideToolbar = false;
         assertTrue(settings.getState().agentPanelVisible);
+        assertTrue(settings.getState().agentReadingMode);
+        assertTrue(settings.getState().autoHideToolbar);
         restored.idleMinutes = -10;
         settings.loadState(restored);
         assertEquals(1, settings.getState().idleMinutes);
         settings.update(false, Integer.MAX_VALUE);
         assertEquals(1440, settings.getState().idleMinutes);
         assertTrue(settings.getState().agentPanelVisible);
+        assertTrue(settings.getState().agentReadingMode);
     }
 
     public void testOnlyChangedOptionsNotifyLiveControllers() {
@@ -62,6 +73,16 @@ public final class HappyuSettingsTest extends LightPlatformTestCase {
         assertEquals(3, notifications.get());
         settings.setAgentPanelVisible(false);
         assertEquals(4, notifications.get());
+        settings.setAgentReadingMode(true);
+        settings.setAgentReadingMode(true);
+        assertEquals(5, notifications.get());
+        settings.setAgentReadingMode(false);
+        assertEquals(6, notifications.get());
+        settings.setAutoHideToolbar(true);
+        settings.setAutoHideToolbar(true);
+        assertEquals(7, notifications.get());
+        settings.setAutoHideToolbar(false);
+        assertEquals(8, notifications.get());
     }
 
     public void testSettingsUiAppliesResetsAndRecreatesSavedOptions() throws Exception {
@@ -71,6 +92,8 @@ public final class HappyuSettingsTest extends LightPlatformTestCase {
             JBCheckBox check = find(ui, JBCheckBox.class);
             JSpinner minutes = find(ui, JSpinner.class);
             JBCheckBox agent = findAgentOption(ui);
+            JBCheckBox reading = findOption(ui, "Use Agent");
+            JBCheckBox autoHide = findOption(ui, "Automatically hide");
             JBLabel label = find(ui, JBLabel.class);
             assertFalse(check.isSelected());
             assertFalse(minutes.isEnabled());
@@ -79,11 +102,15 @@ public final class HappyuSettingsTest extends LightPlatformTestCase {
             assertTrue(minutes.isEnabled());
             minutes.setValue(30);
             agent.doClick();
+            reading.doClick();
+            autoHide.doClick();
             assertTrue(configurable.isModified());
             configurable.apply();
             assertTrue(settings.getState().autoSleepEnabled);
             assertEquals(30, settings.getState().idleMinutes);
             assertTrue(settings.getState().agentPanelVisible);
+            assertTrue(settings.getState().agentReadingMode);
+            assertTrue(settings.getState().autoHideToolbar);
             assertFalse(configurable.isModified());
             check.doClick();
             minutes.setValue(5);
@@ -93,6 +120,8 @@ public final class HappyuSettingsTest extends LightPlatformTestCase {
             assertTrue(label.isEnabled());
             assertEquals(30, minutes.getValue());
             assertTrue(agent.isSelected());
+            assertTrue(reading.isSelected());
+            assertTrue(autoHide.isSelected());
             settings.update(false, 45);
             configurable.reset();
             assertFalse(minutes.isEnabled());
@@ -103,6 +132,8 @@ public final class HappyuSettingsTest extends LightPlatformTestCase {
             assertFalse(find(ui, JBCheckBox.class).isSelected());
             assertEquals(45, find(ui, JSpinner.class).getValue());
             assertTrue(findAgentOption(ui).isSelected());
+            assertTrue(findOption(ui, "Use Agent").isSelected());
+            assertTrue(findOption(ui, "Automatically hide").isSelected());
         } finally {
             configurable.disposeUIResources();
         }
@@ -138,10 +169,14 @@ public final class HappyuSettingsTest extends LightPlatformTestCase {
     }
 
     private static JBCheckBox findAgentOption(Container parent) {
+        return findOption(parent, "Show Agent");
+    }
+
+    private static JBCheckBox findOption(Container parent, String prefix) {
         for (Component child : parent.getComponents()) {
-            if (child instanceof JBCheckBox check && check.getText().startsWith("Show Agent")) return check;
+            if (child instanceof JBCheckBox check && check.getText().startsWith(prefix)) return check;
             if (child instanceof Container container) {
-                JBCheckBox result = findAgentOption(container);
+                JBCheckBox result = findOption(container, prefix);
                 if (result != null) return result;
             }
         }

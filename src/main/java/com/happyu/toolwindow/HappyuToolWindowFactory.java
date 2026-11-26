@@ -80,6 +80,17 @@ public final class HappyuToolWindowFactory implements ToolWindowFactory, DumbAwa
             public void setSelected(@NotNull AnActionEvent event, boolean selected) {
                 project.getService(HappyuSettings.class).setAgentPanelVisible(selected);
             }
+        }, new DumbAwareToggleAction("Agent Reading Mode", "Read web pages in Agent conversation style",
+                IconLoader.getIcon("/icons/reading.svg", HappyuToolWindowFactory.class)) {
+            @Override
+            public boolean isSelected(@NotNull AnActionEvent event) {
+                return project.getService(HappyuSettings.class).getState().agentReadingMode;
+            }
+
+            @Override
+            public void setSelected(@NotNull AnActionEvent event, boolean selected) {
+                project.getService(HappyuSettings.class).setAgentReadingMode(selected);
+            }
         }));
         if (saved.initialized) {
             for (HappyuTabsState.Tab tab : saved.tabs) addTab(project, toolWindow, tab, false);
