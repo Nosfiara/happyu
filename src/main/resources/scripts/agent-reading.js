@@ -85,9 +85,17 @@
       .image-preview-header { display: flex; gap: 12px; align-items: center; padding: 10px 14px;
         border-bottom: 1px solid var(--reader-border); }
       .image-preview-header strong { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 12px; }
-      .image-preview-stage { padding: 16px; overflow: auto; text-align: center; background: var(--reader-card); }
-      .image-preview img { display: block; visibility: visible; max-width: 100%; max-height: calc(100vh - 180px);
-        width: auto; height: auto; object-fit: contain; margin: auto; }
+      .image-preview-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 14px; }
+      .image-preview-controls output { min-width: 48px; text-align: center; font-size: 12px; font-variant-numeric: tabular-nums; }
+      .image-preview-controls small { color: var(--reader-muted); font-size: 11px; }
+      .image-preview-controls button:disabled { cursor: default; }
+      .image-preview-stage { padding: 16px; overflow: auto; overscroll-behavior: contain; touch-action: none;
+        text-align: center; background: var(--reader-card); }
+      .image-preview-stage.pannable { cursor: grab; }
+      .image-preview-stage.dragging { cursor: grabbing; }
+      .image-preview-canvas { position: relative; min-width: 100%; min-height: 100%; }
+      .image-preview img { display: block; visibility: visible; max-width: none; max-height: none;
+        position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); user-select: none; }
       .image-preview-status { color: var(--reader-muted); padding: 12px; font-size: 12px; }
       .image-preview [hidden] { display: none; }
       .load-more { display: block; margin: 18px auto 0; }
@@ -253,6 +261,7 @@
       if (!preview) return;
       state.preview = null;
       clearTimeout(preview.timer);
+      window.removeEventListener('resize', preview.resize);
       preview.image.onload = preview.image.onerror = null;
       preview.image.removeAttribute('src');
       preview.dialog.close();
@@ -270,20 +279,119 @@
       make('strong', '', 'imageView · ' + imageName(url), header);
       const close = make('button', '', '关闭 · Esc', header);
       close.type = 'button';
+      const controls = make('div', 'image-preview-controls', '', dialog);
+      const zoomOut = make('button', '', '−', controls);
+      zoomOut.setAttribute('aria-label', '缩小图片');
+      const percent = make('output', '', '—', controls);
+      percent.setAttribute('aria-label', '图片缩放比例');
+      const zoomIn = make('button', '', '+', controls);
+      zoomIn.setAttribute('aria-label', '放大图片');
+      const fit = make('button', '', '适应窗口', controls);
+      const actual = make('button', '', '原始大小', controls);
+      const zoomButtons = [zoomOut, zoomIn, fit, actual];
+      for (const button of zoomButtons) { button.type = 'button'; button.disabled = true; }
+      make('small', '', '滚轮缩放 · 放大后拖动查看', controls);
       const stage = make('div', 'image-preview-stage', '', dialog);
-      const image = make('img', '', '', stage);
+      stage.tabIndex = 0;
+      stage.setAttribute('aria-label', '图片查看区域，可滚轮缩放或拖动查看');
+      const canvas = make('div', 'image-preview-canvas', '', stage);
+      canvas.hidden = true;
+      const image = make('img', '', '', canvas);
       image.alt = trigger.title || imageName(url);
+      image.draggable = false;
       image.hidden = true;
       const feedback = make('div', 'image-preview-status', '正在加载图片…', stage);
       feedback.setAttribute('role', 'status');
       const retry = make('button', '', '重试', stage);
       retry.type = 'button';
       retry.hidden = true;
-      const preview = {dialog, image, trigger};
+      const preview = {dialog, image, trigger, zoom: 1, fitZoom: 1, fitted: true, loaded: false};
       state.preview = preview;
+      const updateZoom = (value, point, fitted = false) => {
+        if (state.preview !== preview || !preview.loaded) return;
+        const stageRect = stage.getBoundingClientRect();
+        point ||= {x: stageRect.left + stage.clientLeft + stage.clientWidth / 2,
+          y: stageRect.top + stage.clientTop + stage.clientHeight / 2};
+        const before = image.getBoundingClientRect();
+        const anchorX = before.width ? Math.max(0, Math.min(1, (point.x - before.left) / before.width)) : 0.5;
+        const anchorY = before.height ? Math.max(0, Math.min(1, (point.y - before.top) / before.height)) : 0.5;
+        preview.zoom = Math.max(Math.min(0.1, preview.fitZoom), Math.min(8, value));
+        preview.fitted = fitted;
+        const width = image.naturalWidth * preview.zoom, height = image.naturalHeight * preview.zoom;
+        canvas.style.width = Math.ceil(width) + 'px';
+        canvas.style.height = Math.ceil(height) + 'px';
+        image.style.width = width + 'px';
+        image.style.height = height + 'px';
+        if (fitted) stage.scrollTo(0, 0);
+        else {
+          const after = image.getBoundingClientRect();
+          stage.scrollLeft += after.left + anchorX * after.width - point.x;
+          stage.scrollTop += after.top + anchorY * after.height - point.y;
+        }
+        percent.value = Math.round(preview.zoom * 100) + '%';
+        zoomOut.disabled = preview.zoom <= Math.min(0.1, preview.fitZoom);
+        zoomIn.disabled = preview.zoom >= 8;
+        fit.disabled = actual.disabled = false;
+        stage.classList.toggle('pannable', stage.scrollWidth > stage.clientWidth || stage.scrollHeight > stage.clientHeight);
+      };
+      preview.resize = () => {
+        if (state.preview !== preview || !preview.loaded) return;
+        const availableHeight = Math.max(1, window.innerHeight - header.offsetHeight - controls.offsetHeight - 58);
+        preview.fitZoom = Math.min(1, Math.max(1, stage.clientWidth - 32) / image.naturalWidth,
+          availableHeight / image.naturalHeight);
+        // Keep the viewing area stable while zooming; only window resizing recalculates its height.
+        stage.style.height = Math.ceil(image.naturalHeight * preview.fitZoom) + 32 + 'px';
+        updateZoom(preview.fitted ? preview.fitZoom : preview.zoom, null, preview.fitted);
+      };
+      zoomOut.onclick = () => updateZoom(preview.zoom / 1.25);
+      zoomIn.onclick = () => updateZoom(preview.zoom * 1.25);
+      fit.onclick = () => updateZoom(preview.fitZoom, null, true);
+      actual.onclick = () => updateZoom(1);
+      stage.addEventListener('wheel', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!preview.loaded || !event.deltaY) return;
+        const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? stage.clientHeight : 1);
+        updateZoom(preview.zoom * Math.exp(-Math.max(-500, Math.min(500, delta)) * 0.002),
+          {x: event.clientX, y: event.clientY});
+      }, {passive: false});
+      dialog.addEventListener('keydown', event => {
+        if (event.ctrlKey || event.metaKey || event.altKey || !preview.loaded) return;
+        const action = {'+': zoomIn, '=': zoomIn, '-': zoomOut, '0': fit, '1': actual}[event.key];
+        if (!action) return;
+        event.preventDefault();
+        event.stopPropagation();
+        action.click();
+      });
+      stage.addEventListener('pointerdown', event => {
+        if (event.button !== 0 || !preview.loaded || !stage.classList.contains('pannable')) return;
+        event.preventDefault();
+        stage.focus({preventScroll: true});
+        preview.drag = {id: event.pointerId, x: event.clientX, y: event.clientY,
+          left: stage.scrollLeft, top: stage.scrollTop};
+        stage.setPointerCapture(event.pointerId);
+        stage.classList.add('dragging');
+      });
+      stage.addEventListener('pointermove', event => {
+        const drag = preview.drag;
+        if (!drag || drag.id !== event.pointerId) return;
+        stage.scrollLeft = drag.left + drag.x - event.clientX;
+        stage.scrollTop = drag.top + drag.y - event.clientY;
+      });
+      const endDrag = event => {
+        if (preview.drag?.id !== event.pointerId) return;
+        preview.drag = null;
+        stage.classList.remove('dragging');
+        if (stage.hasPointerCapture(event.pointerId)) stage.releasePointerCapture(event.pointerId);
+      };
+      for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) stage.addEventListener(type, endDrag);
+      window.addEventListener('resize', preview.resize);
       const failed = () => {
         if (state.preview !== preview) return;
         clearTimeout(preview.timer);
+        preview.loaded = false;
+        canvas.hidden = true;
+        for (const button of zoomButtons) button.disabled = true;
         image.hidden = true;
         feedback.hidden = false;
         feedback.textContent = '图片加载失败，可重试或切回原网页查看。';
@@ -291,6 +399,10 @@
       };
       const load = () => {
         clearTimeout(preview.timer);
+        preview.loaded = false;
+        preview.fitted = true;
+        canvas.hidden = true;
+        for (const button of zoomButtons) button.disabled = true;
         image.hidden = true;
         image.removeAttribute('src');
         feedback.hidden = false;
@@ -304,8 +416,11 @@
       image.onload = () => {
         if (state.preview !== preview) return;
         clearTimeout(preview.timer);
+        preview.loaded = true;
+        canvas.hidden = false;
         image.hidden = false;
         feedback.hidden = true;
+        preview.resize();
       };
       image.onerror = failed;
       close.onclick = state.closeImagePreview;

@@ -242,6 +242,105 @@ test('image file cards load only on click despite image blocking, preview follow
   assert.equal(await card.evaluate(n=>n.getRootNode().activeElement===n),true);
 });
 
+test('image preview zooms around the pointer, pans by dragging and keeps the reader and dialog size stable', async t => {
+  const page=await fixture(t,'<main><p style="height:800px">正文</p><img data-src="https://cdn.example.test/zoom.svg"></main>');
+  let requests=0;
+  await page.route('https://cdn.example.test/**',route=>{
+    requests++;
+    return route.fulfill({contentType:'image/svg+xml',body:'<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000"><rect width="1600" height="1000" fill="#4682b4"/></svg>'});
+  });
+  await enablePreview(page);
+  const reader=page.locator('#happyu-agent-reading');
+  await reader.locator('.image-card').click();
+  const dialog=reader.getByRole('dialog'), stage=dialog.locator('.image-preview-stage'), image=dialog.locator('img');
+  await image.waitFor({state:'visible'});
+  const initial=await dialog.boundingBox();
+  const fittedPercent=await dialog.locator('output').textContent();
+  const readingPosition=await page.evaluate(()=>__happyuAgentReading.viewport.scrollTop);
+  await dialog.getByRole('button',{name:'原始大小',exact:true}).click();
+  assert.equal(await dialog.locator('output').textContent(),'100%');
+  assert.equal(Math.round((await image.boundingBox()).width),1600);
+  await dialog.getByRole('button',{name:'放大图片',exact:true}).click();
+  assert.equal(await dialog.locator('output').textContent(),'125%');
+  assert.equal(Math.round((await image.boundingBox()).width),2000);
+  assert.equal((await dialog.boundingBox()).height,initial.height);
+
+  const box=await stage.boundingBox(), point={x:box.x+box.width/2+35,y:box.y+box.height/2+20};
+  const before=await image.boundingBox();
+  const anchor={x:(point.x-before.x)/before.width,y:(point.y-before.y)/before.height};
+  await page.mouse.move(point.x,point.y);
+  await page.mouse.wheel(0,-200);
+  await page.waitForFunction(()=>__happyuAgentReading.preview.zoom>1.5);
+  const after=await image.boundingBox();
+  assert.ok(Math.abs(after.x+anchor.x*after.width-point.x)<2);
+  assert.ok(Math.abs(after.y+anchor.y*after.height-point.y)<2);
+  const scrollBefore=await stage.evaluate(n=>({x:n.scrollLeft,y:n.scrollTop}));
+  await page.mouse.down();
+  await page.mouse.move(point.x-80,point.y-50,{steps:5});
+  await page.mouse.up();
+  const scrollAfter=await stage.evaluate(n=>({x:n.scrollLeft,y:n.scrollTop,dragging:n.classList.contains('dragging')}));
+  assert.ok(scrollAfter.x>=scrollBefore.x+78);
+  assert.ok(scrollAfter.y>=scrollBefore.y+48);
+  assert.equal(scrollAfter.dragging,false);
+  assert.equal(await page.evaluate(()=>__happyuAgentReading.viewport.scrollTop),readingPosition);
+
+  await dialog.getByRole('button',{name:'适应窗口',exact:true}).click();
+  assert.equal(await dialog.locator('output').textContent(),fittedPercent);
+  assert.deepEqual(await stage.evaluate(n=>[n.scrollLeft,n.scrollTop]),[0,0]);
+  await page.keyboard.press('1');
+  assert.equal(await dialog.locator('output').textContent(),'100%');
+  await page.keyboard.press('-');
+  assert.equal(await dialog.locator('output').textContent(),'80%');
+  await page.keyboard.press('0');
+  assert.equal(await dialog.locator('output').textContent(),fittedPercent);
+  assert.equal(requests,1);
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(()=>window.allowedPreview==='');
+  assert.equal(await page.evaluate(()=>__happyuAgentReading.viewport.scrollTop),readingPosition);
+});
+
+test('preview zoom respects limits, adapts to a narrow resized window and resets when reopened', async t => {
+  const page=await fixture(t,'<main><img data-src="https://cdn.example.test/large.svg"></main>');
+  await page.route('https://cdn.example.test/**',route=>route.fulfill({contentType:'image/svg+xml',
+    body:'<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1800"><rect width="1200" height="1800" fill="#4682b4"/></svg>'}));
+  await enablePreview(page);
+  const reader=page.locator('#happyu-agent-reading'), card=reader.locator('.image-card');
+  await card.click();
+  const dialog=reader.getByRole('dialog'), stage=dialog.locator('.image-preview-stage'), image=dialog.locator('img');
+  await image.waitFor({state:'visible'});
+  await page.setViewportSize({width:340,height:500});
+  await page.waitForFunction(()=>{
+    const preview=__happyuAgentReading.preview, image=preview.image.getBoundingClientRect();
+    const area=preview.image.closest('.image-preview-stage').getBoundingClientRect();
+    // CSS width changes immediately; the browser dispatches the resize handler on a later frame.
+    return preview.fitted && preview.dialog.getBoundingClientRect().width<340
+      && image.width<=area.width-30 && image.height<=area.height-30;
+  });
+  const fit=await image.boundingBox(), area=await stage.boundingBox(), bounds=await dialog.boundingBox();
+  assert.ok(fit.width<=area.width-30 && fit.height<=area.height-30);
+  assert.ok(bounds.y>=0 && bounds.y+bounds.height<=500);
+  await dialog.getByRole('button',{name:'原始大小',exact:true}).click();
+  await page.setViewportSize({width:538,height:760});
+  await page.waitForFunction(()=>__happyuAgentReading.preview.dialog.getBoundingClientRect().width>500);
+  assert.equal(await dialog.locator('output').textContent(),'100%');
+  for (const [delta,percent,button] of [[-500,'800%','放大图片'],[500,'10%','缩小图片']]) {
+    await stage.evaluate((n,delta)=>{
+      const rect=n.getBoundingClientRect();
+      for(let i=0;i<20;i++) n.dispatchEvent(new WheelEvent('wheel',{deltaY:delta,clientX:rect.x+50,clientY:rect.y+50,cancelable:true,bubbles:true}));
+    },delta);
+    assert.equal(await dialog.locator('output').textContent(),percent);
+    assert.equal(await dialog.getByRole('button',{name:button,exact:true}).isDisabled(),true);
+  }
+  await page.keyboard.press('Escape');
+  await card.click();
+  await image.waitFor({state:'visible'});
+  assert.equal(await page.evaluate(()=>__happyuAgentReading.preview.fitted),true);
+  assert.notEqual(await dialog.locator('output').textContent(),'10%');
+  await page.evaluate(()=>__happyuAgentReading.dispose());
+  await page.setViewportSize({width:340,height:500});
+  assert.equal(await reader.count(),0);
+});
+
 test('image sources update dynamically, picture srcset is supported and failed previews can retry', async t => {
   const page=await fixture(t,'<main><p>图片</p><img data-original="https://cdn.example.test/old.png">'
     +'<picture><source media="not all" srcset="https://cdn.example.test/responsive.png 1x, https://cdn.example.test/large.png 2x"><img></picture>'
