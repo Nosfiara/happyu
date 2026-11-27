@@ -42,15 +42,48 @@ test('Tieba reply titles distinguish total from loaded and retain known totals a
   await enable(page);await ready(page);
   const reader=page.locator('#happyu-agent-reading');
   const heading=reader.locator('.replies-card>summary');
-  assert.equal(await heading.textContent(),'65 条回复 · 已加载 2 条');
+  assert.equal(await heading.textContent(),'67 条回复 · 已加载 2 条');
   await heading.click();
   await reader.getByRole('button',{name:'展开 65 条回复',exact:true}).click();
   await page.waitForFunction(()=>__happyuAgentReading.content.querySelectorAll('.reply-bubble').length===3);
-  assert.equal(await heading.textContent(),'65 条回复 · 已加载 3 条');
+  assert.equal(await heading.textContent(),'67 条回复 · 已加载 3 条');
   assert.equal(await reader.locator('.replies-card').evaluate(n=>n.open),true);
   await page.evaluate(()=>document.querySelector('.lzl-wrapper').setAttribute('data-total-count','54'));
   await page.waitForFunction(()=>__happyuAgentReading.content.querySelector('.replies-card>summary').textContent.includes('54 条回复'));
   assert.equal(await heading.textContent(),'54 条回复 · 已加载 3 条');
+});
+
+test('modern Tieba expand count excludes the visible replies and decreases as more replies load', async t => {
+  const page=await fixture(t,tiebaThread,'https://tieba.baidu.com/p/remaining-counts');
+  await page.evaluate(()=>{
+    const group=document.querySelector('.lzl-wrapper'), button=group.querySelector('.show-more-lzl');
+    button.before(...Array.from(group.querySelectorAll('.pb-lzl-item'),node=>node.cloneNode(true)));
+    button.textContent='展开 53 条回复';
+    button.onclick=()=>{
+      const reply=group.querySelector('.pb-lzl-item').cloneNode(true);
+      reply.querySelector('.pb-rich-text').textContent='新增楼中楼回复';
+      button.before(reply);
+      button.textContent='展开 52 条回复';
+    };
+  });
+  await enable(page);await ready(page);
+  const reader=page.locator('#happyu-agent-reading'), heading=reader.locator('.replies-card>summary');
+  assert.equal(await heading.textContent(),'57 条回复 · 已加载 4 条');
+  await heading.click();
+  await reader.getByRole('button',{name:'展开 53 条回复',exact:true}).click();
+  await page.waitForFunction(()=>__happyuAgentReading.content.querySelectorAll('.reply-bubble').length===5);
+  assert.equal(await heading.textContent(),'57 条回复 · 已加载 5 条');
+  await page.evaluate(()=>document.querySelector('.show-more-lzl').textContent='展开更多回复');
+  await reader.getByRole('button',{name:'展开更多回复',exact:true}).waitFor();
+  assert.equal(await heading.textContent(),'57 条回复 · 已加载 5 条');
+});
+
+test('other sites retain their total-count meaning for expand controls', async t => {
+  const page=await fixture(t,'<main><div class="l_post" data-floor="1"><div class="reply-list">'
+    +'<div class="reply-item">第一条</div><div class="reply-item">第二条</div>'
+    +'<button>展开 53 条回复</button></div></div></main>');
+  await enable(page);await ready(page);
+  assert.equal(await page.locator('#happyu-agent-reading .replies-card>summary').textContent(),'53 条回复 · 已加载 2 条');
 });
 
 test('classic metadata provides the complete reply total and refreshes independently of loaded reply count', async t => {

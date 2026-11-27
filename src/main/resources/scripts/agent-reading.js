@@ -556,11 +556,15 @@
       return match && Number(match[1] || match[2]) > 0 ? Number(match[1] || match[2]) : null;
     };
     const replyNumber = value => /^\d{1,9}$/.test(String(value ?? '').trim()) ? Number(value) : null;
-    const replyLabelCount = value => {
+    const replyLabelCount = (value, source) => {
       const label = String(value || '').trim();
       if (label.length > 80) return null;
       const remaining = label.match(/^(?:还有|剩余)\s*(\d{1,9})\s*条(?:回复|评论)/);
       if (remaining) return {remaining: Number(remaining[1])};
+      // Modern Tieba excludes the visible preview replies from its "expand N replies" count.
+      const expand = source?.matches('.show-more-lzl')
+        && label.match(/^展开\s*(\d{1,9})\s*条(?:楼中楼)?(?:回复|评论)\s*$/);
+      if (expand) return {remaining: Number(expand[1])};
       const total = label.match(/^(?:(?:展开|查看|显示|全部|共)\s*)?(\d{1,9})\s*(?:条)?(?:楼中楼)?(?:回复|评论)\s*$/)
         || label.match(/^(?:回复|评论)\s*[（(]\s*(\d{1,9})\s*[）)]\s*$/);
       return total ? {total: Number(total[1])} : null;
@@ -573,7 +577,7 @@
       }
       const actionGroup = action?.closest(replyGroups);
       const hint = action && !action.closest(replies) && (!actionGroup || actionGroup === node)
-        ? replyLabelCount(action.textContent) : null;
+        ? replyLabelCount(action.textContent, action) : null;
       const previous = state.renderedContext === state.context
         ? replyNumber(state.cards.get(nodeKey(node))?.dataset.replyTotal) : null;
       replyTotals.set(details, {declared, hint, previous});
@@ -587,7 +591,7 @@
           let hint = info?.hint;
           for (const button of details.querySelectorAll('button[data-reader-action]')) {
             if (button.closest('.replies-card') !== details || button.closest('.reply-bubble')) continue;
-            const count = replyLabelCount(button.textContent);
+            const count = replyLabelCount(button.textContent, state.buildActions.get(button.dataset.readerAction));
             if (count) { hint = count; break; }
           }
           total = hint ? hint.total ?? loaded + hint.remaining : info?.previous ?? null;
